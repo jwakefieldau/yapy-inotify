@@ -4,25 +4,31 @@ cimport posix.unistd
 import os
 
 # masks
-dir_masks_by_name = {
-	'IN_CREATE': 0x00000100,
-}
+IN_CREATE = 0x00000100
+IN_ACCESS = 0x00000001
 
-file_masks_by_name = {
-	'IN_ACCESS': 0x00000001,
-}
+file_mask_list = [
+	IN_ACCESS,
+]
 
-dir_masks_by_val = invert_dict(dir_masks_by_name)
-file_masks_by_val = invert_dict(file_masks_by_name)
+dir_mask_list = [
+	IN_CREATE,
+]
 
-all_masks_by_name = dir_masks_by_name + file_masks_by_name
-all_masks_by_val = invert_dict(all_masks_by_name)
+all_file_masks = 0
+for mask in file_mask_list:
+	all_file_masks |= mask
 
-def invert_dict(d):
-	return {v: k for (k, v) in d.iteritems()}
+all_dir_masks = 0
+for mask in dir_mask_list:
+	all_dir_masks |= mask
+
 
 #TODO - do we need an EventDispatcher class or is that pointless abstraction?
 #might it help with matching up MOVED_FROM/MOVED_TO ?  Is that even necessary? 
+
+#TODO - make syscall wrappers raise exceptions on invalid arguments etc,
+# and general -1 return conditions
 
 class Event(object):
 	wd = None
@@ -40,50 +46,32 @@ def init():
 
 # does path need to be made persistent?
 def add_watch(fd, path, mask):
-	if not all_masks_by_val.has_key(mask):
-		raise ValueError("%d is not a valid mask" % (mask))
 	return inotify_add_watch(fd, path, mask)
 
 def add_tree_watch(fd, path, mask):
+	# extract the file and dir mask from the mask passed, OR IN_CREATE with the dir mask
+	# so that new dirs can be picked up and masks added to files and subdirs
 	# walk the tree rooted at path and add watches
-	# if the masks are for directories, only add them to directories
-	# if the masks are for files, add them to files
-	# if for both, etc.
 
-	#TODO - need to watch (IN_CREATE | any_other_dir_masks) on all subdirs so that we can apply
-	# the mask to new subdirs or files as they are created.
 	#NOTE - maybe this is a good case for the EventDispatcher class - to maintain the necessary
-	# state to enable this?
+	# state to enable this? ie: to match events read against a tree watch
 	
-	is_file_mask = file_masks_by_val.has_key(mask)
-	if is_file_mask:
-		is_dir_mask = False
-	else:	
-		is_dir_mask = dir_masks_by_val.has_key(mask)
-
-	if (not is_file_mask) and (not is_dir_mask):
-		raise ValueError("%d is not a valid mask" % (mask))
+	file_mask = mask & all_file_masks
+	dir_mask = mask & all_dir_masks
 
 	for (root, dirnames, filenames) in os.walk(path):
-		if is_file_mask:
+		if file_mask > 0:
 			for filename in filenames:
 				#TODO do something with wd
-				wd = add_watch(fd, os.path.join(root, filename), mask)
-			dir_mask = dir_masks_by_name['IN_CREATE']
-		elif is_dir_mask:
-			dir_mask = mask | dir_masks_by_name['IN_CREATE']
-		else:
-			# this is accounted for above, by raising ValueError
-			pass
+				wd = add_watch(fd, os.path.join(root, filename), file_mask)
+			dir_mask |= IN_CREATE
 		for dirname in dirnames:
 			#TODO - do something with wd
 			wd = add_watch(fd, os.path.join(root, dirname), dir_mask)
 					
 
-def rm_watch(wd, mask_name):
-	if not all_masks_by_val.has_key(mask):
-		raise ValueError("%d is not a valid mask" % (mask))
-	return inotify_rm_watch(wd, all_masks_by_name[mask_name])
+def rm_watch(wd, mask):
+	return inotify_rm_watch(wd, mask)
 
 def gen_read_events(fd):
 	#TODO should read buffer size be configurable?
@@ -122,7 +110,7 @@ def gen_read_events(fd):
 
 			e = Event(
 				wd=event_buf[i].wd,
-				mask_name=all_masks_by_val[event_buf[i].mask],
+				mask=event_buf[i].mask,
 				cookie=event_buf[i].cookie,
 				name=event_buf[i].name[:event_buf[i].len]
 			)
