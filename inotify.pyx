@@ -19,9 +19,16 @@ all_file_masks = 0
 for mask in file_mask_list:
 	all_file_masks |= mask
 
+#DEBUG
+print "all_file_masks:%x" % (all_file_masks)
+
+
 all_dir_masks = 0
 for mask in dir_mask_list:
 	all_dir_masks |= mask
+
+#DEBUG
+print "all_dir_masks:%x" % (all_dir_masks)
 
 
 #TODO - do we need an EventDispatcher class or is that pointless abstraction?
@@ -57,17 +64,35 @@ def add_tree_watch(fd, path, mask):
 	# state to enable this? ie: to match events read against a tree watch
 	
 	file_mask = mask & all_file_masks
-	dir_mask = mask & all_dir_masks
+
+	#DEBUG
+	print "file_mask: %x" % (file_mask)
+
+	dir_mask = (mask & all_dir_masks) | IN_CREATE
+
+	#DEBUG
+	print "dir_mask: %x" % (dir_mask)
+
 
 	for (root, dirnames, filenames) in os.walk(path):
 		if file_mask > 0:
 			for filename in filenames:
 				#TODO do something with wd
-				wd = add_watch(fd, os.path.join(root, filename), file_mask)
-			dir_mask |= IN_CREATE
+
+				file_path = os.path.join(root, filename)
+				#DEBUG
+				print "About to add watch with mask %x to file with path %s" % (file_mask, file_path)
+
+				wd = add_watch(fd, os.path.join(root, file_path), file_mask)
 		for dirname in dirnames:
 			#TODO - do something with wd
-			wd = add_watch(fd, os.path.join(root, dirname), dir_mask)
+
+			dir_path = os.path.join(root, dirname)
+
+			#DEBUG
+			print "About to add watch with mask %x to dir with path %s" % (dir_mask, dir_path)
+
+			wd = add_watch(fd, os.path.join(root, dir_path), dir_mask)
 					
 
 def rm_watch(wd, mask):
@@ -75,8 +100,8 @@ def rm_watch(wd, mask):
 
 def gen_read_events(fd):
 	#TODO should read buffer size be configurable?
-	# should I go back to reading into a char * buf?
-	cdef inotify_event event_buf[16]
+	cdef char read_buf[4096]
+	cdef inotify_event *event_ptr = <inotify_event *>&read_buf[0]
 	cdef ssize_t read_len = 0
 	cdef ssize_t processed_len = 0
 	cdef unsigned int i = 0
@@ -85,12 +110,13 @@ def gen_read_events(fd):
 	while True:
 		# this read() will return immediately if there are any events to consume,
 		# it won't block waiting to fill the buffer completely
-		read_len = posix.unistd.read(fd, event_buf, 16 * sizeof(inotify_event))
+		read_len = posix.unistd.read(fd, read_buf, 4096)
 		if read_len < 0:
 
 			#TODO not sure this is the right way to raise exceptions
 			raise IOError("read() returned %d" % (read_len))
 
+		i = 0
 		while (processed_len < read_len): 
 
 			# NOTE - cython's sizeof() only evaluates the static size of the type
@@ -109,13 +135,14 @@ def gen_read_events(fd):
 			# add that to the new file
 
 			e = Event(
-				wd=event_buf[i].wd,
-				mask=event_buf[i].mask,
-				cookie=event_buf[i].cookie,
-				name=event_buf[i].name[:event_buf[i].len]
+				wd=event_ptr[i].wd,
+				mask=event_ptr[i].mask,
+				cookie=event_ptr[i].cookie,
 			)
+			if event_ptr[i].len > 0:
+				e.name = event_ptr[i].name[:event_ptr[i].len]
 			yield e	
 			
-			processed_len += (sizeof(event_buf[i]) + event_buf[i].len)
+			processed_len += (sizeof(inotify_event) + event_ptr[i].len)
 			i += 1
 
