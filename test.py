@@ -1,13 +1,15 @@
-import inotify
+from inotify import EventDispatcher, Event, Watch, IN_ACCESS
 
-fd = inotify.init()
-#wd = inotify.add_watch(fd, "/tmp/foo", inotify.IN_CREATE)
-
-#print "watching IN_CREATE on /tmp/foo"
+ed = EventDispatcher()
 
 print "watching IN_ACCESS for all files under /tmp/foo, and IN_CREATE for all dirs under /tmp/foo, so that when support is added, IN_ACCESS can be watched for all new files under new dirs"
  
-inotify.add_tree_watch(fd, "/tmp/foo", inotify.IN_ACCESS)
+w = Watch(
+	mask=IN_ACCESS,
+	path="/tmp/foo",
+)
+	
+ed.add_tree_watch(w)
 
-for event in inotify.gen_read_events(fd):
-	print "%s,%d,%d,%d" % (event.name, event.wd, event.mask, event.cookie)
+for event in ed.gen_events():
+	print "%s,%x,%s,%x" % (event.name, event.mask, event.watch_obj.path, event.watch_obj.mask)
