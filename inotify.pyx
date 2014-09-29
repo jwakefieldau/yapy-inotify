@@ -1,5 +1,7 @@
 cimport inotify
 cimport posix.unistd
+cimport libc.errno
+cimport libc.string
 
 import os
 import stat
@@ -16,14 +18,16 @@ dir_mask_list = [
 	IN_CREATE,
 ]
 
-all_file_masks = 0
+ALL_FILE_MASKS = 0
 for mask in file_mask_list:
-	all_file_masks |= mask
+	ALL_FILE_MASKS |= mask
 
 
-all_dir_masks = 0
+ALL_DIR_MASKS = 0
 for mask in dir_mask_list:
-	all_dir_masks |= mask
+	ALL_DIR_MASKS |= mask
+
+ALL_MASKS = ALL_FILE_MASKS | ALL_DIR_MASKS
 
 
 #TODO - make syscall wrappers raise exceptions on invalid arguments etc,
@@ -57,6 +61,14 @@ class Watch(object):
 	def __init__(self, **kwargs):
 		set_attrs_from_kwargs(self, **kwargs)
 
+	#TODO - render string representing watch, eg:
+	# [+(for tree):path:mask0|mask1...|maskn
+	def __str__(self):
+		pass
+		
+	def __unicode__(self):
+		pass
+
 
 class EventDispatcher(object):
 	_wd_list = []
@@ -71,10 +83,17 @@ class EventDispatcher(object):
 
 		self._wd_list = [None] * max_user_watches
 		self._inotify_fd = inotify_init()
+
+		if self._inotify_fd == -1:
+			raise OSError("Unable to initialise inotify, %s" % libc.string.strerror(libc.errno.errno))
+		
 		self.blocking_read = blocking_read
 		
 	def add_watch(self, watch_obj):
 		wd = inotify_add_watch(self._inotify_fd, watch_obj.path, watch_obj.mask)
+
+		if wd == -1:
+			raise OSError("Unable to add watch, %s" % libc.string.strerror(libc.errno.errno))
 
 		# adding wd to the Watch object allows easy lookup in the list to remove it later
 		watch_obj._wd = wd
@@ -93,12 +112,12 @@ class EventDispatcher(object):
 		# so that new dirs can be picked up and masks added to files and subdirs
 		# walk the tree rooted at path and add watches
 
-		file_mask = input_watch_obj.mask & all_file_masks
+		file_mask = input_watch_obj.mask & ALL_FILE_MASKS
 
 		#DEBUG
 		print "file_mask: %x" % (file_mask)
 
-		dir_mask = (input_watch_obj.mask & all_dir_masks) | IN_CREATE
+		dir_mask = (input_watch_obj.mask & ALL_DIR_MASKS) | IN_CREATE
 
 		#DEBUG
 		print "dir_mask: %x" % (dir_mask)
@@ -139,7 +158,9 @@ class EventDispatcher(object):
 		if (watch_obj._is_tree_root) and (len(watch_obj._child_watch_list) > 0): 
 			raise ValueError("Cannot remove tree roots with live children individually")
 
-		inotify_rm_watch(self._inotify_fd, watch_obj._wd)
+		ret = inotify_rm_watch(self._inotify_fd, watch_obj._wd)
+		if ret == -1:
+			raise OSError("Unable to remove watch %s:%s" % (watch_obj, libc.string.strerror(libc.errno.errno)))
 
 		if watch_obj._is_tree and not watch_obj._is_tree_root:
 			watch_obj._tree_root_watch._child_watch_set.discard(watch_obj)
@@ -169,10 +190,8 @@ class EventDispatcher(object):
 			#TODO - support non-blocking read so that we yield straight away when there are no
 			# events
 			read_len = posix.unistd.read(self._inotify_fd, read_buf, 4096)
-			if read_len < 0:
-
-				#TODO not sure this is the right way to raise exceptions
-				raise IOError("read() returned %d" % (read_len))
+			if read_len == -1:
+				raise IOError("error reading inotify data: %s" % (libc.string.strerror(libc.errno.errno)))
 
 			i = 0
 			while (processed_len < read_len): 
@@ -212,12 +231,12 @@ class EventDispatcher(object):
 					# is this S_ISDIR necessary?
 					if stat.S_ISDIR(create_stat_mode):
 						# new dir, apply the dir mask bits of the mask, OR IN_CREATE
-						dir_mask=((matched_watch_obj.mask & all_dir_masks)  | IN_CREATE),
+						dir_mask=((matched_watch_obj.mask & ALL_DIR_MASKS)  | IN_CREATE),
 						new_watch_obj.mask = dir_mask
 						
 					else:
 						# new regular file, apply the file mask bits of the mask
-						file_mask = matched_watch_obj.mask & all_file_masks
+						file_mask = matched_watch_obj.mask & ALL_FILE_MASKS
 						new_watch_obj.mask = file_mask
 
 					#DEBUG
