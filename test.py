@@ -2,7 +2,7 @@ from inotify import EventDispatcher, Event, Watch, IN_ACCESS
 
 ed = EventDispatcher()
 
-print "watching IN_ACCESS for all files under /tmp/foo, and IN_CREATE for all dirs under /tmp/foo, so that when support is added, IN_ACCESS can be watched for all new files under new dirs"
+print "watching IN_ACCESS for all files under /tmp/foo, recursively"
  
 w = Watch(
 	mask=IN_ACCESS,

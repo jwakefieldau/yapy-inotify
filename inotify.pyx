@@ -7,6 +7,56 @@ import os
 import stat
 
 # masks
+
+# from inotify(7)
+"""
+        IN_ACCESS         File was accessed (read) (*).
+           IN_ATTRIB         Metadata changed, e.g., permissions, timestamps, extended attributes, link count (since Linux 2.6.25), UID, GID, etc. (*).
+           IN_CLOSE_WRITE    File opened for writing was closed (*).
+           IN_CLOSE_NOWRITE  File not opened for writing was closed (*).
+           IN_CREATE         File/directory created in watched directory (*).
+           IN_DELETE         File/directory deleted from watched directory (*).
+           IN_DELETE_SELF    Watched file/directory was itself deleted.
+           IN_MODIFY         File was modified (*).
+           IN_MOVE_SELF      Watched file/directory was itself moved.
+           IN_MOVED_FROM     File moved out of watched directory (*).
+           IN_MOVED_TO       File moved into watched directory (*).
+           IN_OPEN           File was opened (*).
+
+       When monitoring a directory, the events marked with an asterisk (*) above can occur for files in the directory, in which case the name field in the returned
+       inotify_event structure identifies the name of the file within the directory.
+
+       The IN_ALL_EVENTS macro is defined as a bit mask of all of the above events.  This macro can be used as the mask argument when calling inotify_add_watch(2).
+
+       Two additional convenience macros are IN_MOVE, which equates to IN_MOVED_FROM|IN_MOVED_TO, and IN_CLOSE, which equates to IN_CLOSE_WRITE|IN_CLOSE_NOWRITE.
+
+       The following further bits can be specified in mask when calling inotify_add_watch(2):
+
+           IN_DONT_FOLLOW (since Linux 2.6.15)
+                             Don't dereference pathname if it is a symbolic link.
+           IN_EXCL_UNLINK (since Linux 2.6.36)
+                             By  default, when watching events on the children of a directory, events are generated for children even after they have been unlinked
+                             from the directory.  This can result in large numbers of uninteresting events for some applications (e.g., if watching /tmp, in  which
+                             many  applications create temporary files whose names are immediately unlinked).  Specifying IN_EXCL_UNLINK changes the default behav‐
+                             ior, so that events are not generated for children after they have been unlinked from the watched directory.
+           IN_MASK_ADD       Add (OR) events to watch mask for this pathname if it already exists (instead of replacing mask).
+           IN_ONESHOT        Monitor pathname for one event, then remove from watch list.
+           IN_ONLYDIR (since Linux 2.6.15)
+                             Only watch pathname if it is a directory.
+
+
+       The following bits may be set in the mask field returned by read(2):
+
+           IN_IGNORED        Watch was removed explicitly (inotify_rm_watch(2)) or automatically (file was deleted, or file system was unmounted).
+           IN_ISDIR          Subject of this event is a directory.
+           IN_Q_OVERFLOW     Event queue overflowed (wd is -1 for this event).
+           IN_UNMOUNT        File system containing watched object was unmounted.
+
+
+
+"""
+
+
 IN_CREATE = 0x00000100
 IN_ACCESS = 0x00000001
 
@@ -29,9 +79,12 @@ for mask in dir_mask_list:
 
 ALL_MASKS = ALL_FILE_MASKS | ALL_DIR_MASKS
 
+mask_name_by_val = {
+	IN_CREATE: 'IN_CREATE',
+	IN_ACCESS: 'IN_ACCESS',
+}
 
-#TODO - make syscall wrappers raise exceptions on invalid arguments etc,
-# and general -1 return conditions
+
 
 def set_attrs_from_kwargs(obj, **kwargs):
 	for (k, v) in kwargs.items():
@@ -44,6 +97,7 @@ class Event(object):
 	cookie = None
 	name = None
 	watch_obj = None
+	full_event_path = None
 
 	def __init__(self, **kwargs):
 		set_attrs_from_kwargs(self, **kwargs)
@@ -61,13 +115,27 @@ class Watch(object):
 	def __init__(self, **kwargs):
 		set_attrs_from_kwargs(self, **kwargs)
 
-	#TODO - render string representing watch, eg:
+	# render string representing watch, eg:
 	# [+(for tree):path:mask0|mask1...|maskn
+	def _render_str_rep(self):
+		mask_name_str = '|'.join([v for (k, v) in mask_name_by_val.iteritems() if (self.mask & k) > 0])
+		if self._is_tree:
+			if self._is_tree_root:
+				tree_str = '_+_'
+			else:
+				tree_str = '+'
+		else:
+			tree_str = ''
+		ret_str = ':'.join([tree_str, self.path, mask_name_str])
+
+		return ret_str
+
 	def __str__(self):
-		pass
+		return str(self._render_str_rep())
+
 		
 	def __unicode__(self):
-		pass
+		return unicode(self._render_str_rep())
 
 
 class EventDispatcher(object):
@@ -93,7 +161,7 @@ class EventDispatcher(object):
 		wd = inotify_add_watch(self._inotify_fd, watch_obj.path, watch_obj.mask)
 
 		if wd == -1:
-			raise OSError("Unable to add watch, %s" % libc.string.strerror(libc.errno.errno))
+			raise OSError("Unable to add watch %s, error: %s" % (watch_obj, libc.string.strerror(libc.errno.errno)))
 
 		# adding wd to the Watch object allows easy lookup in the list to remove it later
 		watch_obj._wd = wd
@@ -107,30 +175,38 @@ class EventDispatcher(object):
 			watch_obj._tree_root_watch._child_watch_set.add(watch_obj)	
 			
 
-	def add_tree_watch(self, input_watch_obj):
+	def add_tree_watch(self, root_watch_obj):
 		# extract the file and dir mask from the mask passed, OR IN_CREATE with the dir mask
 		# so that new dirs can be picked up and masks added to files and subdirs
 		# walk the tree rooted at path and add watches
 
-		file_mask = input_watch_obj.mask & ALL_FILE_MASKS
+		#TODO - instead of adding watches for all files, take advantage of behaviour where
+		# the event will be generated by the kernel either for the directory itself 
+		# (in which case, the name is omitted) or a file in the directory (basename is specified
+		# as name)
+
+
+		#NOTE - NEW BEHAVIOUR
+		# * raise ValueError if root is not a dir
+		# * OR input mask with IN_CREATE
+		# * descend through dir tree and add watch with mask to any *directories*
+		# * 
+
+		root_watch_obj._is_tree = True
+		root_watch_obj._is_tree_root = True
+		root_watch_obj.mask |= IN_CREATE
+
+		
+		file_mask = root_watch_obj.mask & ALL_FILE_MASKS
 
 		#DEBUG
 		print "file_mask: %x" % (file_mask)
 
-		dir_mask = (input_watch_obj.mask & ALL_DIR_MASKS) | IN_CREATE
+		dir_mask = root_watch_obj.mask & ALL_DIR_MASKS
 
 		#DEBUG
 		print "dir_mask: %x" % (dir_mask)
 		
-		# create a new Watch derived from the input watch to be the root - it needs to have the dir
-		# mask
-		root_watch_obj = Watch(
-			_is_tree = True,
-			_is_tree_root = True,
-			path=input_watch_obj.path,
-			mask=dir_mask
-		)
-
 		self.add_watch(root_watch_obj)
 
 		for (root, dirnames, filenames) in os.walk(root_watch_obj.path):
@@ -196,20 +272,27 @@ class EventDispatcher(object):
 			i = 0
 			while (processed_len < read_len): 
 
+
+				matched_watch_obj = self._wd_list[event_ptr[i].wd]
+
+				#NOTE - NEW BEHAVIOUR
+				# * if event_name is None, we know the event occurred on the watched
+				# directory itself, rather than a file within it
+				# * only add new watches for created directories; we will get events
+				# back for files in watched directories anyway
+
+				# Cython docs say the fastest way to copy C strings to Python 
+				# is by slicing the length so it doesn't need to call strlen()
+
 				# NOTE - cython's sizeof() only evaluates the static size of the type
 				# of its argument.  Since .name is a char[] in libc, it is considered
 				# by sizeof() to occupy no space
-
-
-				#TODO - associate this event with any tree watches via wd?
-				# if it's an IN_CREATE for a new dir under tree, add the tree watch's dir mask
-				# if it's an IN_CREATE for a new file under tree and the tree watch has a file mask,
-				# add that to the new file
-
-				#DEBUG
-				print "Read event with wd: %d" % event_ptr[i].wd
-
-				matched_watch_obj = self._wd_list[event_ptr[i].wd]
+				if event_ptr[i].len > 0:
+					event_name = event_ptr[i].name[:event_ptr[i].len]
+					full_event_path = os.path.join(matched_watch_obj.path, event_name)
+				else:
+					event_name = None
+					full_event_path = matched_watch_obj.path
 				
 				#NOTE - there is an unavoidable race condition here - we can't
 				# guarantee that we watch the newly created file/dir before
@@ -219,22 +302,38 @@ class EventDispatcher(object):
 				# ctimes and listdir(), but there is no guarantee that such files
 				# have not already been removed!
 				if matched_watch_obj._is_tree and (event_ptr[i].mask & IN_CREATE) > 0:
-					new_path = os.path.join(matched_watch_obj.path, event_ptr[i].name) 
-					create_stat_mode = os.stat(new_path).st_mode
+					create_stat_mode = os.stat(full_event_path).st_mode
 
 					new_watch_obj = Watch(
-						path=new_path,
+						path=full_event_path,
 						_is_tree=True,
-						_tree_root_watch=matched_watch_obj._tree_root_watch
+						_tree_root_watch=matched_watch_obj if matched_watch_obj._is_tree_root else matched_watch_obj._tree_root_watch
 					)
+
+					#TODO - can we actually just use the root watch's mask on all files and dirs?
+					# are there masks that have significantly different behaviour for files and dirs?
+					# are there masks that inotify won't let us apply to files and dirs?
+
+		
+					#TODO take advantage of behaviour where events are generated for either
+					# files in dir (basename specified as name) or dir itself (no name)
+
 
 					# is this S_ISDIR necessary?
 					if stat.S_ISDIR(create_stat_mode):
+
+						#DEBUG
+						print "stat indicates %s is a dir" % new_path
+
 						# new dir, apply the dir mask bits of the mask, OR IN_CREATE
 						dir_mask=((matched_watch_obj.mask & ALL_DIR_MASKS)  | IN_CREATE),
 						new_watch_obj.mask = dir_mask
 						
 					else:
+
+						#DEBUG
+						print "stat indicates %s is a file" % new_path
+
 						# new regular file, apply the file mask bits of the mask
 						file_mask = matched_watch_obj.mask & ALL_FILE_MASKS
 						new_watch_obj.mask = file_mask
@@ -246,8 +345,6 @@ class EventDispatcher(object):
 						
 					self.add_watch(new_watch_obj)
 
-				# Cython docs say the fastest way to copy C strings to Python 
-				# is by slicing the length so it doesn't need to call strlen()
 				e = Event(
 					_wd=event_ptr[i].wd,
 					watch_obj=matched_watch_obj,
@@ -256,6 +353,10 @@ class EventDispatcher(object):
 				)
 				if event_ptr[i].len > 0:
 					e.name = event_ptr[i].name[:event_ptr[i].len]
+					e.full_event_path = os.path.join(matched_watch_obj.path, e.name)
+
+				else:
+					e.full_event_path = matched_watch_obj.path
 				
 				processed_len += (sizeof(inotify_event) + event_ptr[i].len)
 				i += 1
