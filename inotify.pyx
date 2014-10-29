@@ -197,27 +197,27 @@ class EventDispatcher(object):
 		root_watch_obj.mask |= IN_CREATE
 
 		
-		file_mask = root_watch_obj.mask & ALL_FILE_MASKS
+		#file_mask = root_watch_obj.mask & ALL_FILE_MASKS
 
 		#DEBUG
-		print "file_mask: %x" % (file_mask)
+		#print "file_mask: %x" % (file_mask)
 
-		dir_mask = root_watch_obj.mask & ALL_DIR_MASKS
+		#dir_mask = root_watch_obj.mask & ALL_DIR_MASKS
 
 		#DEBUG
-		print "dir_mask: %x" % (dir_mask)
+		#print "dir_mask: %x" % (dir_mask)
 		
 		self.add_watch(root_watch_obj)
 
 		for (root, dirnames, filenames) in os.walk(root_watch_obj.path):
-			if file_mask > 0:
-				for filename in filenames:
-					file_path = os.path.join(root, filename)
+			#if file_mask > 0:
+				#for filename in filenames:
+					#file_path = os.path.join(root, filename)
 					#DEBUG
-					print "About to add watch with mask %x to file with path %s" % (file_mask, file_path)
+					#print "About to add watch with mask %x to file with path %s" % (file_mask, file_path)
 
-					new_watch_obj = Watch(mask=file_mask, path=file_path, _is_tree=True, _tree_root_watch=root_watch_obj)
-					self.add_watch(new_watch_obj)
+					#new_watch_obj = Watch(mask=file_mask, path=file_path, _is_tree=True, _tree_root_watch=root_watch_obj)
+					#self.add_watch(new_watch_obj)
 
 			for dirname in dirnames:
 				dir_path = os.path.join(root, dirname)
@@ -293,7 +293,7 @@ class EventDispatcher(object):
 				else:
 					event_name = None
 					full_event_path = matched_watch_obj.path
-				
+
 				#NOTE - there is an unavoidable race condition here - we can't
 				# guarantee that we watch the newly created file/dir before
 				# the events we want to watch occur on it.
@@ -317,9 +317,6 @@ class EventDispatcher(object):
 		
 					#TODO take advantage of behaviour where events are generated for either
 					# files in dir (basename specified as name) or dir itself (no name)
-
-
-					# is this S_ISDIR necessary?
 					if stat.S_ISDIR(create_stat_mode):
 
 						#DEBUG
@@ -329,15 +326,6 @@ class EventDispatcher(object):
 						dir_mask=((matched_watch_obj.mask & ALL_DIR_MASKS)  | IN_CREATE),
 						new_watch_obj.mask = dir_mask
 						
-					else:
-
-						#DEBUG
-						print "stat indicates %s is a file" % new_path
-
-						# new regular file, apply the file mask bits of the mask
-						file_mask = matched_watch_obj.mask & ALL_FILE_MASKS
-						new_watch_obj.mask = file_mask
-
 					#DEBUG
 					print "new watch obj - adding due to matched tree watch:"
 					print "================================================="
