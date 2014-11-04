@@ -60,6 +60,8 @@ import stat
 IN_CREATE = 0x00000100
 IN_ACCESS = 0x00000001
 
+IN_ISDIR = 0x40000000
+
 file_mask_list = [
 	IN_ACCESS,
 ]
@@ -206,6 +208,9 @@ class EventDispatcher(object):
 
 		#DEBUG
 		#print "dir_mask: %x" % (dir_mask)
+
+		if not stat.S_ISDIR(os.stat(root_watch_obj.path).st_mode):
+			raise ValueError("Can't root a tree watch at %s as it is not a directory" % (root_watch_obj.path))
 		
 		self.add_watch(root_watch_obj)
 
@@ -223,9 +228,9 @@ class EventDispatcher(object):
 				dir_path = os.path.join(root, dirname)
 
 				#DEBUG
-				print "About to add watch with mask %x to dir with path %s" % (dir_mask, dir_path)
+				print "About to add watch with mask %x to dir with path %s" % (root_watch_obj.mask, dir_path)
 
-				new_watch_obj = Watch(mask=dir_mask, path=dir_path, _is_tree=True, _tree_root_watch=root_watch_obj)
+				new_watch_obj = Watch(mask=root_watch_obj.mask, path=dir_path, _is_tree=True, _tree_root_watch=root_watch_obj)
 				self.add_watch(new_watch_obj)
 
 					
@@ -302,35 +307,11 @@ class EventDispatcher(object):
 				# ctimes and listdir(), but there is no guarantee that such files
 				# have not already been removed!
 				if matched_watch_obj._is_tree and (event_ptr[i].mask & IN_CREATE) > 0:
-					create_stat_mode = os.stat(full_event_path).st_mode
-
 					new_watch_obj = Watch(
 						path=full_event_path,
 						_is_tree=True,
 						_tree_root_watch=matched_watch_obj if matched_watch_obj._is_tree_root else matched_watch_obj._tree_root_watch
 					)
-
-					#TODO - can we actually just use the root watch's mask on all files and dirs?
-					# are there masks that have significantly different behaviour for files and dirs?
-					# are there masks that inotify won't let us apply to files and dirs?
-
-		
-					#TODO take advantage of behaviour where events are generated for either
-					# files in dir (basename specified as name) or dir itself (no name)
-					if stat.S_ISDIR(create_stat_mode):
-
-						#DEBUG
-						print "stat indicates %s is a dir" % new_path
-
-						# new dir, apply the dir mask bits of the mask, OR IN_CREATE
-						dir_mask=((matched_watch_obj.mask & ALL_DIR_MASKS)  | IN_CREATE),
-						new_watch_obj.mask = dir_mask
-						
-					#DEBUG
-					print "new watch obj - adding due to matched tree watch:"
-					print "================================================="
-					print "path=%s,mask=%x"
-						
 					self.add_watch(new_watch_obj)
 
 				e = Event(
