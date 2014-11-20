@@ -6,84 +6,65 @@ cimport libc.string
 import os
 import stat
 
-# masks
+# masks - from inotify.h
 
-# from inotify(7)
-"""
-        IN_ACCESS         File was accessed (read) (*).
-           IN_ATTRIB         Metadata changed, e.g., permissions, timestamps, extended attributes, link count (since Linux 2.6.25), UID, GID, etc. (*).
-           IN_CLOSE_WRITE    File opened for writing was closed (*).
-           IN_CLOSE_NOWRITE  File not opened for writing was closed (*).
-           IN_CREATE         File/directory created in watched directory (*).
-           IN_DELETE         File/directory deleted from watched directory (*).
-           IN_DELETE_SELF    Watched file/directory was itself deleted.
-           IN_MODIFY         File was modified (*).
-           IN_MOVE_SELF      Watched file/directory was itself moved.
-           IN_MOVED_FROM     File moved out of watched directory (*).
-           IN_MOVED_TO       File moved into watched directory (*).
-           IN_OPEN           File was opened (*).
+IN_ACCESS 	=	0x00000001      #File was accessed 
+IN_MODIFY	=	0x00000002      # File was modified 
+IN_ATTRIB       =       0x00000004      # Metadata changed 
+IN_CLOSE_WRITE  =       0x00000008      # Writtable file was closed 
+IN_CLOSE_NOWRITE  =     0x00000010      # Unwrittable file closed 
+IN_OPEN         =       0x00000020      # File was opened 
+IN_MOVED_FROM   =       0x00000040      # File was moved from X 
+IN_MOVED_TO     =       0x00000080      # File was moved to Y 
+IN_CREATE       =       0x00000100      # Subfile was created 
+IN_DELETE       =       0x00000200      # Subfile was deleted 
+IN_DELETE_SELF  =       0x00000400      # Self was deleted 
+IN_MOVE_SELF    =       0x00000800      # Self was moved 
 
-       When monitoring a directory, the events marked with an asterisk (*) above can occur for files in the directory, in which case the name field in the returned
-       inotify_event structure identifies the name of the file within the directory.
+# the following are legal events.  they are sent as needed to any watch 
+IN_UNMOUNT      =       0x00002000      # Backing fs was unmounted 
+IN_Q_OVERFLOW   =       0x00004000      # Event queued overflowed 
+IN_IGNORED      =       0x00008000      # File was ignored 
 
-       The IN_ALL_EVENTS macro is defined as a bit mask of all of the above events.  This macro can be used as the mask argument when calling inotify_add_watch(2).
+# helper events 
+IN_CLOSE        =        (IN_CLOSE_WRITE | IN_CLOSE_NOWRITE) # close 
+IN_MOVE         =        (IN_MOVED_FROM | IN_MOVED_TO) # moves 
 
-       Two additional convenience macros are IN_MOVE, which equates to IN_MOVED_FROM|IN_MOVED_TO, and IN_CLOSE, which equates to IN_CLOSE_WRITE|IN_CLOSE_NOWRITE.
+# special flags 
+IN_ONLYDIR      =       0x01000000      # only watch the path if it is a directory 
+IN_DONT_FOLLOW  =       0x02000000      # don't follow a sym link 
+IN_EXCL_UNLINK  =        0x04000000      # exclude events on unlinked objects 
+IN_MASK_ADD     =       0x20000000      # add to the mask of an already existing watch 
+IN_ISDIR        =        0x40000000      # event occurred against dir 
+IN_ONESHOT      =       0x80000000      # only send event once 
 
-       The following further bits can be specified in mask when calling inotify_add_watch(2):
-
-           IN_DONT_FOLLOW (since Linux 2.6.15)
-                             Don't dereference pathname if it is a symbolic link.
-           IN_EXCL_UNLINK (since Linux 2.6.36)
-                             By  default, when watching events on the children of a directory, events are generated for children even after they have been unlinked
-                             from the directory.  This can result in large numbers of uninteresting events for some applications (e.g., if watching /tmp, in  which
-                             many  applications create temporary files whose names are immediately unlinked).  Specifying IN_EXCL_UNLINK changes the default behav‐
-                             ior, so that events are not generated for children after they have been unlinked from the watched directory.
-           IN_MASK_ADD       Add (OR) events to watch mask for this pathname if it already exists (instead of replacing mask).
-           IN_ONESHOT        Monitor pathname for one event, then remove from watch list.
-           IN_ONLYDIR (since Linux 2.6.15)
-                             Only watch pathname if it is a directory.
-
-
-       The following bits may be set in the mask field returned by read(2):
-
-           IN_IGNORED        Watch was removed explicitly (inotify_rm_watch(2)) or automatically (file was deleted, or file system was unmounted).
-           IN_ISDIR          Subject of this event is a directory.
-           IN_Q_OVERFLOW     Event queue overflowed (wd is -1 for this event).
-           IN_UNMOUNT        File system containing watched object was unmounted.
-
-
-
-"""
-
-
-IN_CREATE = 0x00000100
-IN_ACCESS = 0x00000001
-
-IN_ISDIR = 0x40000000
-
-file_mask_list = [
-	IN_ACCESS,
-]
-
-dir_mask_list = [
-	IN_CREATE,
-]
-
-ALL_FILE_MASKS = 0
-for mask in file_mask_list:
-	ALL_FILE_MASKS |= mask
-
-
-ALL_DIR_MASKS = 0
-for mask in dir_mask_list:
-	ALL_DIR_MASKS |= mask
-
-ALL_MASKS = ALL_FILE_MASKS | ALL_DIR_MASKS
 
 mask_name_by_val = {
-	IN_CREATE: 'IN_CREATE',
+
 	IN_ACCESS: 'IN_ACCESS',
+	IN_MODIFY: 'IN_MODIFY',
+	IN_ATTRIB: 'IN_ATTRIB',
+	IN_CLOSE_WRITE: 'IN_CLOSE_WRITE',
+	IN_CLOSE_NOWRITE: 'IN_CLOSE_NOWRITE', 
+	IN_OPEN : 'IN_OPEN',       
+	IN_MOVED_FROM: 'IN_MOVED_FROM', 
+	IN_MOVED_TO: 'IN_MOED_TO',
+	IN_CREATE: 'IN_CREATE',    
+	IN_DELETE: 'IN_DELETE',     
+	IN_DELETE_SELF: 'IN_DELETE_SELF', 
+	IN_MOVE_SELF: 'IN_MOVE_SELF',  
+	IN_UNMOUNT: 'IN_UNMOUNT', 
+	IN_Q_OVERFLOW: 'IN_Q_OVERFLOW', 
+	IN_IGNORED: 'IN_IGNORED',   
+	IN_CLOSE: 'IN_CLOSE',   
+	IN_MOVE: 'IN_MOVE',   
+	IN_ONLYDIR: 'IN_ONLYDIR',    
+	IN_DONT_FOLLOW: 'IN_DONT_FOLLOW', 
+	IN_EXCL_UNLINK: 'IN_EXCL_UNLINK', 
+	IN_MASK_ADD: 'IN_MASK_ADD',    
+	IN_ISDIR: 'IN_ISDIR',       
+	IN_ONESHOT: 'IN_ONESHOT'     
+
 }
 
 
@@ -182,48 +163,36 @@ class EventDispatcher(object):
 		# so that new dirs can be picked up and masks added to files and subdirs
 		# walk the tree rooted at path and add watches
 
-		#TODO - instead of adding watches for all files, take advantage of behaviour where
-		# the event will be generated by the kernel either for the directory itself 
-		# (in which case, the name is omitted) or a file in the directory (basename is specified
-		# as name)
-
-
 		#NOTE - NEW BEHAVIOUR
 		# * raise ValueError if root is not a dir
 		# * OR input mask with IN_CREATE
 		# * descend through dir tree and add watch with mask to any *directories*
 		# * 
 
+		#NOTE - does adding a file watch to a dir have the same essential
+		# behaviour as adding the watch to all files in the dir?
+		# YES - for all masks except IN_DELETE_SELF, which should not be a problem
+
+		#TODO - define correct semantics here for IN_DELETE_SELF
+		# * make mask IN_DELETE_SELF | IN_DELETE 
+		# ** this way, we still get notified of deletion of root's immediate subdirs if
+		#    the root is deleted, and all files in the tree
+		#NOTE - does this result in potentially two events on deletion?
+
 		root_watch_obj._is_tree = True
 		root_watch_obj._is_tree_root = True
 		root_watch_obj.mask |= IN_CREATE
 
+		# watching deletion on subdirs is easier than watching self-deletion on all files
+		if root_watch_obj.mask & IN_DELETE_SELF:
+			root_watch_obj.mask |= IN_DELETE
 		
-		#file_mask = root_watch_obj.mask & ALL_FILE_MASKS
-
-		#DEBUG
-		#print "file_mask: %x" % (file_mask)
-
-		#dir_mask = root_watch_obj.mask & ALL_DIR_MASKS
-
-		#DEBUG
-		#print "dir_mask: %x" % (dir_mask)
-
 		if not stat.S_ISDIR(os.stat(root_watch_obj.path).st_mode):
 			raise ValueError("Can't root a tree watch at %s as it is not a directory" % (root_watch_obj.path))
 		
 		self.add_watch(root_watch_obj)
 
 		for (root, dirnames, filenames) in os.walk(root_watch_obj.path):
-			#if file_mask > 0:
-				#for filename in filenames:
-					#file_path = os.path.join(root, filename)
-					#DEBUG
-					#print "About to add watch with mask %x to file with path %s" % (file_mask, file_path)
-
-					#new_watch_obj = Watch(mask=file_mask, path=file_path, _is_tree=True, _tree_root_watch=root_watch_obj)
-					#self.add_watch(new_watch_obj)
-
 			for dirname in dirnames:
 				dir_path = os.path.join(root, dirname)
 
