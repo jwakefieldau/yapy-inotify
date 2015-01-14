@@ -6,6 +6,100 @@ cimport libc.string
 import os
 import stat
 
+
+#TODO - BUG - after mkdir -p /tmp/foo/bar/baz, rm -rf /tmp/foo results
+# in garbage read from inotify fd after delete event for /tmp/foo/bar
+
+"""
+ $ ./test.py 
+watching IN_DELETE for all files under /tmp/foo, recursively
+adding tree watch :/tmp/foo:IN_DELETE
+added watch with wd: 1, path: /tmp/foo, mask: 300
+About to add watch with mask 300 to dir with path /tmp/foo/bar
+added watch with wd: 2, path: /tmp/foo/bar, mask: 300
+About to add watch with mask 300 to dir with path /tmp/foo/bar/baz
+added watch with wd: 3, path: /tmp/foo/bar/baz, mask: 300
+      MARK BEFORE rm -rf
+
+
+event struct read in gen_events(): len:0 name:(null) wd:3 mask:32768 (IN_IGNORED)
+None,8000,/tmp/foo/bar/baz,300
+event struct read in gen_events(): len:16 name:baz wd:2 mask:1073742336 (IN_ISDIR|IN_DELETE)
+baz,40000200,/tmp/foo/bar,300
+event struct read in gen_events(): len:0 name:(null) wd:8020322 mask:0 ()
+Traceback (most recent call last):
+  File "./test.py", line 18, in <module>
+    for event in ed.gen_events():
+  File "inotify.pyx", line 302, in gen_events (inotify.c:4287)
+    matched_watch_obj = self._wd_list[event_ptr[i].wd]
+IndexError: list index out of range
+
+
+"""
+
+#NOTE however that when we read one event's data at a time, it works correctly:
+
+"""
+$ python ./test.py 
+watching IN_DELETE for all files under /tmp/foo, recursively
+adding tree watch :/tmp/foo:IN_DELETE
+added watch with wd: 1, path: /tmp/foo, mask: 300
+About to add watch with mask 300 to dir with path /tmp/foo/bar
+added watch with wd: 2, path: /tmp/foo/bar, mask: 300
+About to add watch with mask 300 to dir with path /tmp/foo/bar/baz
+added watch with wd: 3, path: /tmp/foo/bar/baz, mask: 300
+read_len: 16
+event struct read in gen_events(): len:0 name:(null) wd:3 mask:32768 (IN_IGNORED)
+None,8000,/tmp/foo/bar/baz,300
+read_len: 32
+event struct read in gen_events(): len:16 name:baz wd:2 mask:1073742336 (IN_ISDIR|IN_DELETE)
+baz,40000200,/tmp/foo/bar,300
+read_len: 16
+event struct read in gen_events(): len:0 name:(null) wd:2 mask:32768 (IN_IGNORED)
+None,8000,/tmp/foo/bar,300
+read_len: 32
+event struct read in gen_events(): len:16 name:bar wd:1 mask:1073742336 (IN_ISDIR|IN_DELETE)
+bar,40000200,/tmp/foo,300
+read_len: 16
+event struct read in gen_events(): len:0 name:(null) wd:1 mask:32768 (IN_IGNORED)
+None,8000,/tmp/foo,300
+"""
+
+# note that what looks like a mask value seems to be in the wd field for the last
+# event
+
+# note the definition, and particularly, field ordering, of the inotify_event struct:
+
+"""
+cdef struct inotify_event:
+                int wd
+                unsigned int mask
+                unsigned int cookie
+                unsigned int len
+                #NOTE - this is char [] in in the C declaration, but 
+                #Cython doesn't distinguish, nor support that syntax.
+                # **This means that sizeof() considers 'name' to be of size 0**
+                char *name
+"""
+
+# are we going past the end of the useful data in the read?  compare events seen 
+# by us to events seen by inotifywatch
+
+"""
+ $ inotifywatch -r /tmp/foo
+Establishing watches...
+Finished establishing watches, now collecting statistics.
+^Ctotal  close_nowrite  open  delete  delete_self  filename
+7      2              2     1       1            /tmp/foo/bar/
+7      2              2     1       1            /tmp/foo/
+4      1              1     0       1            /tmp/foo/bar/baz/
+
+
+"""
+
+# is it a problem with pointer arithmetic/array indexing due to sizeof(event_ptr) being inconsistent?
+
+
 # masks - from inotify.h
 
 IN_ACCESS 	=	0x00000001      #File was accessed 
@@ -74,6 +168,10 @@ def set_attrs_from_kwargs(obj, **kwargs):
 		if hasattr(obj, k):
 			setattr(obj, k, v)
 
+def render_mask_str(input_mask):
+	return '|'.join([v for (k, v) in mask_name_by_val.iteritems() if (input_mask & k) > 0])
+
+
 class Event(object):
 	_wd = None
 	mask = None
@@ -101,7 +199,7 @@ class Watch(object):
 	# render string representing watch, eg:
 	# [+(for tree):path:mask0|mask1...|maskn
 	def _render_str_rep(self):
-		mask_name_str = '|'.join([v for (k, v) in mask_name_by_val.iteritems() if (self.mask & k) > 0])
+		mask_name_str = render_mask_str(self.mask)
 		if self._is_tree:
 			if self._is_tree_root:
 				tree_str = '_+_'
@@ -173,10 +271,6 @@ class EventDispatcher(object):
 		# behaviour as adding the watch to all files in the dir?
 		# YES - for all masks except IN_DELETE_SELF, which should not be a problem
 
-		#TODO - define correct semantics here for IN_DELETE_SELF
-		# * make mask IN_DELETE_SELF | IN_DELETE 
-		# ** this way, we still get notified of deletion of root's immediate subdirs if
-		#    the root is deleted, and all files in the tree
 		#NOTE - does this result in potentially two events on deletion?
 
 		root_watch_obj._is_tree = True
@@ -234,19 +328,30 @@ class EventDispatcher(object):
 
 
 		while True:
+
+			# zero read_buf to avoid re-reading what will be nonsense on second read
+			libc.string.memset(read_buf, 0, 4096)
+
 			# this read() will return immediately if there are any events to consume,
 			# it won't block waiting to fill the buffer completely
 
 			#TODO - support non-blocking read so that we yield straight away when there are no
 			# events
 			read_len = posix.unistd.read(self._inotify_fd, read_buf, 4096)
+
+			#DEBUG
+			print "read_len: %d" % read_len
+
 			if read_len == -1:
 				raise IOError("error reading inotify data: %s" % (libc.string.strerror(libc.errno.errno)))
 
 			i = 0
+			processed_len = 0
 			while (processed_len < read_len): 
 
-
+				#DEBUG
+				print "event struct read in gen_events(): len:%d name:%s wd:%d mask:%d (%s)" % (event_ptr[i].len, event_ptr[i].name if event_ptr[i].len > 0 else '(null)', event_ptr[i].wd, event_ptr[i].mask, render_mask_str(event_ptr[i].mask))
+					
 				matched_watch_obj = self._wd_list[event_ptr[i].wd]
 
 				#NOTE - NEW BEHAVIOUR
@@ -278,6 +383,7 @@ class EventDispatcher(object):
 				if matched_watch_obj._is_tree and (event_ptr[i].mask & IN_CREATE) > 0:
 					new_watch_obj = Watch(
 						path=full_event_path,
+						mask=matched_watch_obj.mask,
 						_is_tree=True,
 						_tree_root_watch=matched_watch_obj if matched_watch_obj._is_tree_root else matched_watch_obj._tree_root_watch
 					)
@@ -297,6 +403,11 @@ class EventDispatcher(object):
 					e.full_event_path = matched_watch_obj.path
 				
 				processed_len += (sizeof(inotify_event) + event_ptr[i].len)
+
+				#NOTE - given that sizeof(inotify_event) changes, does array indexing
+				# make sense?  Should we point event_ptr past the end of the event just
+				# processed?  Is there any padding between events?  Are they supposed to align
+				# on some consistent width?
 				i += 1
 				
 				yield e	
