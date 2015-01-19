@@ -10,6 +10,8 @@ import stat
 #TODO - BUG - after mkdir -p /tmp/foo/bar/baz, rm -rf /tmp/foo results
 # in garbage read from inotify fd after delete event for /tmp/foo/bar
 
+#NOTE - seems to be fixed by re-initialising event_ptr after new read() :)
+
 """
  $ ./test.py 
 watching IN_DELETE for all files under /tmp/foo, recursively
@@ -22,16 +24,16 @@ added watch with wd: 3, path: /tmp/foo/bar/baz, mask: 300
       MARK BEFORE rm -rf
 
 
+read_len: 16
 event struct read in gen_events(): len:0 name:(null) wd:3 mask:32768 (IN_IGNORED)
 None,8000,/tmp/foo/bar/baz,300
-event struct read in gen_events(): len:16 name:baz wd:2 mask:1073742336 (IN_ISDIR|IN_DELETE)
-baz,40000200,/tmp/foo/bar,300
+read_len: 96
 event struct read in gen_events(): len:0 name:(null) wd:8020322 mask:0 ()
 Traceback (most recent call last):
   File "./test.py", line 18, in <module>
     for event in ed.gen_events():
-  File "inotify.pyx", line 302, in gen_events (inotify.c:4287)
-    matched_watch_obj = self._wd_list[event_ptr[i].wd]
+  File "inotify.pyx", line 358, in gen_events (inotify.c:4295)
+    matched_watch_obj = self._wd_list[event_ptr.wd]
 IndexError: list index out of range
 
 
@@ -319,12 +321,11 @@ class EventDispatcher(object):
 		self.rm_watch(root_watch_obj)	
 
 	def gen_events(self):
-		#TODO should read buffer size be configurable?
 		cdef char read_buf[4096]
 		cdef inotify_event *event_ptr = <inotify_event *>&read_buf[0]
 		cdef ssize_t read_len = 0
 		cdef ssize_t processed_len = 0
-		cdef unsigned int i = 0
+		#cdef unsigned int i = 0
 
 
 		while True:
@@ -345,14 +346,19 @@ class EventDispatcher(object):
 			if read_len == -1:
 				raise IOError("error reading inotify data: %s" % (libc.string.strerror(libc.errno.errno)))
 
-			i = 0
+			#i = 0
 			processed_len = 0
+			event_ptr = <inotify_event *>&read_buf[0]
 			while (processed_len < read_len): 
 
 				#DEBUG
-				print "event struct read in gen_events(): len:%d name:%s wd:%d mask:%d (%s)" % (event_ptr[i].len, event_ptr[i].name if event_ptr[i].len > 0 else '(null)', event_ptr[i].wd, event_ptr[i].mask, render_mask_str(event_ptr[i].mask))
+				#print "event struct read in gen_events(): len:%d name:%s wd:%d mask:%d (%s)" % (event_ptr[i].len, event_ptr[i].name if event_ptr[i].len > 0 else '(null)', event_ptr[i].wd, event_ptr[i].mask, render_mask_str(event_ptr[i].mask))
+				print "event struct read in gen_events(): len:%d name:%s wd:%d mask:%d (%s)" % (event_ptr.len, event_ptr.name if event_ptr.len > 0 else '(null)', event_ptr.wd, event_ptr.mask, render_mask_str(event_ptr.mask))
+
 					
-				matched_watch_obj = self._wd_list[event_ptr[i].wd]
+				#matched_watch_obj = self._wd_list[event_ptr[i].wd]
+				matched_watch_obj = self._wd_list[event_ptr.wd]
+
 
 				#NOTE - NEW BEHAVIOUR
 				# * if event_name is None, we know the event occurred on the watched
@@ -366,12 +372,24 @@ class EventDispatcher(object):
 				# NOTE - cython's sizeof() only evaluates the static size of the type
 				# of its argument.  Since .name is a char[] in libc, it is considered
 				# by sizeof() to occupy no space
-				if event_ptr[i].len > 0:
-					event_name = event_ptr[i].name[:event_ptr[i].len]
+				#if event_ptr[i].len > 0:
+
+				e = Event(
+					_wd=event_ptr.wd,
+					watch_obj=matched_watch_obj,
+					mask=event_ptr.mask,
+					cookie=event_ptr.cookie,
+				)
+
+				if event_ptr.len > 0:
+					event_name = event_ptr.name[:event_ptr.len]
+					e.name = event_name
 					full_event_path = os.path.join(matched_watch_obj.path, event_name)
+					e.full_event_path = full_event_path
 				else:
 					event_name = None
 					full_event_path = matched_watch_obj.path
+					e.full_event_path = full_event_path
 
 				#NOTE - there is an unavoidable race condition here - we can't
 				# guarantee that we watch the newly created file/dir before
@@ -380,7 +398,8 @@ class EventDispatcher(object):
 				# It may be possible to "catch up" missed creations by comparing
 				# ctimes and listdir(), but there is no guarantee that such files
 				# have not already been removed!
-				if matched_watch_obj._is_tree and (event_ptr[i].mask & IN_CREATE) > 0:
+				#if matched_watch_obj._is_tree and (event_ptr[i].mask & IN_CREATE) > 0:
+				if matched_watch_obj._is_tree and (event_ptr.mask & IN_CREATE) > 0:
 					new_watch_obj = Watch(
 						path=full_event_path,
 						mask=matched_watch_obj.mask,
@@ -389,26 +408,8 @@ class EventDispatcher(object):
 					)
 					self.add_watch(new_watch_obj)
 
-				e = Event(
-					_wd=event_ptr[i].wd,
-					watch_obj=matched_watch_obj,
-					mask=event_ptr[i].mask,
-					cookie=event_ptr[i].cookie,
-				)
-				if event_ptr[i].len > 0:
-					e.name = event_ptr[i].name[:event_ptr[i].len]
-					e.full_event_path = os.path.join(matched_watch_obj.path, e.name)
-
-				else:
-					e.full_event_path = matched_watch_obj.path
-				
-				processed_len += (sizeof(inotify_event) + event_ptr[i].len)
-
-				#NOTE - given that sizeof(inotify_event) changes, does array indexing
-				# make sense?  Should we point event_ptr past the end of the event just
-				# processed?  Is there any padding between events?  Are they supposed to align
-				# on some consistent width?
-				i += 1
+				processed_len += (sizeof(inotify_event) + event_ptr.len)
+				event_ptr = <inotify_event *>&read_buf[processed_len]
 				
 				yield e	
 
