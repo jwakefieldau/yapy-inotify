@@ -6,100 +6,10 @@ cimport libc.string
 import os
 import stat
 
-
-#TODO - BUG - after mkdir -p /tmp/foo/bar/baz, rm -rf /tmp/foo results
-# in garbage read from inotify fd after delete event for /tmp/foo/bar
-
-#NOTE - seems to be fixed by re-initialising event_ptr after new read() :)
-
-"""
- $ ./test.py 
-watching IN_DELETE for all files under /tmp/foo, recursively
-adding tree watch :/tmp/foo:IN_DELETE
-added watch with wd: 1, path: /tmp/foo, mask: 300
-About to add watch with mask 300 to dir with path /tmp/foo/bar
-added watch with wd: 2, path: /tmp/foo/bar, mask: 300
-About to add watch with mask 300 to dir with path /tmp/foo/bar/baz
-added watch with wd: 3, path: /tmp/foo/bar/baz, mask: 300
-      MARK BEFORE rm -rf
-
-
-read_len: 16
-event struct read in gen_events(): len:0 name:(null) wd:3 mask:32768 (IN_IGNORED)
-None,8000,/tmp/foo/bar/baz,300
-read_len: 96
-event struct read in gen_events(): len:0 name:(null) wd:8020322 mask:0 ()
-Traceback (most recent call last):
-  File "./test.py", line 18, in <module>
-    for event in ed.gen_events():
-  File "inotify.pyx", line 358, in gen_events (inotify.c:4295)
-    matched_watch_obj = self._wd_list[event_ptr.wd]
-IndexError: list index out of range
-
-
-"""
-
-#NOTE however that when we read one event's data at a time, it works correctly:
-
-"""
-$ python ./test.py 
-watching IN_DELETE for all files under /tmp/foo, recursively
-adding tree watch :/tmp/foo:IN_DELETE
-added watch with wd: 1, path: /tmp/foo, mask: 300
-About to add watch with mask 300 to dir with path /tmp/foo/bar
-added watch with wd: 2, path: /tmp/foo/bar, mask: 300
-About to add watch with mask 300 to dir with path /tmp/foo/bar/baz
-added watch with wd: 3, path: /tmp/foo/bar/baz, mask: 300
-read_len: 16
-event struct read in gen_events(): len:0 name:(null) wd:3 mask:32768 (IN_IGNORED)
-None,8000,/tmp/foo/bar/baz,300
-read_len: 32
-event struct read in gen_events(): len:16 name:baz wd:2 mask:1073742336 (IN_ISDIR|IN_DELETE)
-baz,40000200,/tmp/foo/bar,300
-read_len: 16
-event struct read in gen_events(): len:0 name:(null) wd:2 mask:32768 (IN_IGNORED)
-None,8000,/tmp/foo/bar,300
-read_len: 32
-event struct read in gen_events(): len:16 name:bar wd:1 mask:1073742336 (IN_ISDIR|IN_DELETE)
-bar,40000200,/tmp/foo,300
-read_len: 16
-event struct read in gen_events(): len:0 name:(null) wd:1 mask:32768 (IN_IGNORED)
-None,8000,/tmp/foo,300
-"""
-
-# note that what looks like a mask value seems to be in the wd field for the last
-# event
-
-# note the definition, and particularly, field ordering, of the inotify_event struct:
-
-"""
-cdef struct inotify_event:
-                int wd
-                unsigned int mask
-                unsigned int cookie
-                unsigned int len
-                #NOTE - this is char [] in in the C declaration, but 
-                #Cython doesn't distinguish, nor support that syntax.
-                # **This means that sizeof() considers 'name' to be of size 0**
-                char *name
-"""
-
-# are we going past the end of the useful data in the read?  compare events seen 
-# by us to events seen by inotifywatch
-
-"""
- $ inotifywatch -r /tmp/foo
-Establishing watches...
-Finished establishing watches, now collecting statistics.
-^Ctotal  close_nowrite  open  delete  delete_self  filename
-7      2              2     1       1            /tmp/foo/bar/
-7      2              2     1       1            /tmp/foo/
-4      1              1     0       1            /tmp/foo/bar/baz/
-
-
-"""
-
-# is it a problem with pointer arithmetic/array indexing due to sizeof(event_ptr) being inconsistent?
+#TODO - raise exceptions on IN_UNMOUNT, IN_Q_OVERFLOW?
+#TODO - don't bother yielding IN_INGORED?
+#TODO - add method to EventDispatcher to permit removing all watches and
+#       stopping iteration?
 
 
 # masks - from inotify.h
@@ -322,10 +232,9 @@ class EventDispatcher(object):
 
 	def gen_events(self):
 		cdef char read_buf[4096]
-		cdef inotify_event *event_ptr = <inotify_event *>&read_buf[0]
+		cdef inotify_event *event_ptr
 		cdef ssize_t read_len = 0
 		cdef ssize_t processed_len = 0
-		#cdef unsigned int i = 0
 
 
 		while True:
@@ -346,17 +255,13 @@ class EventDispatcher(object):
 			if read_len == -1:
 				raise IOError("error reading inotify data: %s" % (libc.string.strerror(libc.errno.errno)))
 
-			#i = 0
 			processed_len = 0
 			event_ptr = <inotify_event *>&read_buf[0]
 			while (processed_len < read_len): 
 
 				#DEBUG
-				#print "event struct read in gen_events(): len:%d name:%s wd:%d mask:%d (%s)" % (event_ptr[i].len, event_ptr[i].name if event_ptr[i].len > 0 else '(null)', event_ptr[i].wd, event_ptr[i].mask, render_mask_str(event_ptr[i].mask))
 				print "event struct read in gen_events(): len:%d name:%s wd:%d mask:%d (%s)" % (event_ptr.len, event_ptr.name if event_ptr.len > 0 else '(null)', event_ptr.wd, event_ptr.mask, render_mask_str(event_ptr.mask))
 
-					
-				#matched_watch_obj = self._wd_list[event_ptr[i].wd]
 				matched_watch_obj = self._wd_list[event_ptr.wd]
 
 
@@ -372,7 +277,6 @@ class EventDispatcher(object):
 				# NOTE - cython's sizeof() only evaluates the static size of the type
 				# of its argument.  Since .name is a char[] in libc, it is considered
 				# by sizeof() to occupy no space
-				#if event_ptr[i].len > 0:
 
 				e = Event(
 					_wd=event_ptr.wd,
@@ -398,7 +302,6 @@ class EventDispatcher(object):
 				# It may be possible to "catch up" missed creations by comparing
 				# ctimes and listdir(), but there is no guarantee that such files
 				# have not already been removed!
-				#if matched_watch_obj._is_tree and (event_ptr[i].mask & IN_CREATE) > 0:
 				if matched_watch_obj._is_tree and (event_ptr.mask & IN_CREATE) > 0:
 					new_watch_obj = Watch(
 						path=full_event_path,
