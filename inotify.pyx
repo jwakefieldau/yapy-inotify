@@ -9,7 +9,7 @@ import stat
 #TODO - raise exceptions on IN_UNMOUNT, IN_Q_OVERFLOW?
 #TODO - don't bother yielding IN_INGORED?
 #TODO - add method to EventDispatcher to permit removing all watches and
-#       stopping iteration?
+#       stopping iteration? - close()
 
 
 # masks - from inotify.h
@@ -136,9 +136,13 @@ class EventDispatcher(object):
 	_wd_list = []
 	_inotify_fd = None
 	_closed = False
-	blocking_read = True
+	ioerror_on_unmount = True 
+	ioerror_on_q_overflow = True
+	yield_ignore = False
 
-	def __init__(self, blocking_read=True):
+	def __init__(self, **kwargs):
+
+		set_attrs_from_kwargs(self, **kwargs)
 
 		# determine how big _wd_list needs to be
 		with open('/proc/sys/fs/inotify/max_user_watches') as f_obj:
@@ -149,8 +153,6 @@ class EventDispatcher(object):
 
 		if self._inotify_fd == -1:
 			raise OSError("Unable to initialise inotify, %s" % libc.string.strerror(libc.errno.errno))
-		
-		self.blocking_read = blocking_read
 		
 	def add_watch(self, watch_obj):
 		wd = inotify_add_watch(self._inotify_fd, watch_obj.path, watch_obj.mask)
@@ -191,11 +193,14 @@ class EventDispatcher(object):
 		root_watch_obj._is_tree_root = True
 		root_watch_obj.mask |= IN_CREATE
 
-		# watching deletion on subdirs is easier than watching self-deletion on all files
+		# watching deletion on subdirs means no need to watch self-deletion on anything except
+		# the root
 		if root_watch_obj.mask & IN_DELETE_SELF:
 			root_watch_obj.mask |= IN_DELETE
+			root_watch_obj.child_mask = root_watch_obj.mask ^ IN_DELETE_SELF
 
-		root_watch_obj.child_mask = root_watch_obj.mask ^ IN_DELETE_SELF
+		else:
+			root_watch_obj.child_mask = root_watch_obj.mask
 		
 		if not stat.S_ISDIR(os.stat(root_watch_obj.path).st_mode):
 			raise ValueError("Can't root a tree watch at %s as it is not a directory" % (root_watch_obj.path))
@@ -241,7 +246,7 @@ class EventDispatcher(object):
 		cdef ssize_t processed_len = 0
 
 
-		while True:
+		while not self._closed:
 
 			# zero read_buf to avoid re-reading what will be nonsense on second read
 			libc.string.memset(read_buf, 0, 4096)
@@ -318,16 +323,25 @@ class EventDispatcher(object):
 				processed_len += (sizeof(inotify_event) + event_ptr.len)
 				event_ptr = <inotify_event *>&read_buf[processed_len]
 				
-				yield e	
+				if (event_ptr.mask & IN_UNMOUNT) > 0 and self.ioerror_on_unmount:
+					raise IOError("Backing filesystem for %s unmounted" % (full_event_path))
 
-	def close():
+				elif (event_ptr.mask & IN_Q_OVERFLOW) > 0 and self.ioerror_on_q_overflow:
+					raise IOError('Inotify event queue overflowed')
+				
+				else:
+					if not ((event_ptr.mask & IN_IGNORED) > 0 and not (self.yield_ignore)):
+						yield e	
+
+	def close(self):
 		self._closed = True
-		
-		# 
-		#TODO - remove tree watches first?  or try rm_watch() on all, catch the exception and 
-		# remove them with rm_tree_watch()?
-		for cur_wd, cur_watch in enumerate(self._wd_list):
-			#MARK
-			pass
+
+		for cur_watch in self._wd_list:
+			if cur_watch._is_tree_root:
+				self.rm_tree_watch(cur_watch)
+			else:
+				self.rm_watch(cur_watch)
+
+		posix.unistd.close(self._inotify_fd)	
 			
 		
