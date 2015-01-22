@@ -97,6 +97,7 @@ class Event(object):
 
 class Watch(object):
 	mask = None
+	child_mask = None
 	path = None
 	_wd = None
 	_is_tree = False
@@ -134,6 +135,7 @@ class Watch(object):
 class EventDispatcher(object):
 	_wd_list = []
 	_inotify_fd = None
+	_closed = False
 	blocking_read = True
 
 	def __init__(self, blocking_read=True):
@@ -192,6 +194,8 @@ class EventDispatcher(object):
 		# watching deletion on subdirs is easier than watching self-deletion on all files
 		if root_watch_obj.mask & IN_DELETE_SELF:
 			root_watch_obj.mask |= IN_DELETE
+
+		root_watch_obj.child_mask = root_watch_obj.mask ^ IN_DELETE_SELF
 		
 		if not stat.S_ISDIR(os.stat(root_watch_obj.path).st_mode):
 			raise ValueError("Can't root a tree watch at %s as it is not a directory" % (root_watch_obj.path))
@@ -203,9 +207,9 @@ class EventDispatcher(object):
 				dir_path = os.path.join(root, dirname)
 
 				#DEBUG
-				print "About to add watch with mask %x to dir with path %s" % (root_watch_obj.mask, dir_path)
+				print "About to add watch with mask %x to dir with path %s" % (root_watch_obj.child_mask, dir_path)
 
-				new_watch_obj = Watch(mask=root_watch_obj.mask, path=dir_path, _is_tree=True, _tree_root_watch=root_watch_obj)
+				new_watch_obj = Watch(mask=root_watch_obj.child_mask, path=dir_path, _is_tree=True, _tree_root_watch=root_watch_obj)
 				self.add_watch(new_watch_obj)
 
 					
@@ -305,7 +309,7 @@ class EventDispatcher(object):
 				if matched_watch_obj._is_tree and (event_ptr.mask & IN_CREATE) > 0:
 					new_watch_obj = Watch(
 						path=full_event_path,
-						mask=matched_watch_obj.mask,
+						mask=matched_watch_obj.child_mask if matched_watch_obj._is_tree_root else matched_watch_obj.mask,
 						_is_tree=True,
 						_tree_root_watch=matched_watch_obj if matched_watch_obj._is_tree_root else matched_watch_obj._tree_root_watch
 					)
@@ -316,3 +320,14 @@ class EventDispatcher(object):
 				
 				yield e	
 
+	def close():
+		self._closed = True
+		
+		# 
+		#TODO - remove tree watches first?  or try rm_watch() on all, catch the exception and 
+		# remove them with rm_tree_watch()?
+		for cur_wd, cur_watch in enumerate(self._wd_list):
+			#MARK
+			pass
+			
+		
