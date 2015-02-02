@@ -6,11 +6,8 @@ cimport libc.string
 import os
 import stat
 
-#TODO - raise exceptions on IN_UNMOUNT, IN_Q_OVERFLOW?
-#TODO - don't bother yielding IN_INGORED?
 #TODO - add method to EventDispatcher to permit removing all watches and
 #       stopping iteration? - close()
-
 
 # masks - from inotify.h
 
@@ -219,24 +216,27 @@ class EventDispatcher(object):
 
 					
 
-	def rm_watch(self, watch_obj):
-		if (watch_obj._is_tree_root) and (len(watch_obj._child_watch_list) > 0): 
+	def rm_watch(self, watch_obj, discard=True):
+		if (watch_obj._is_tree_root) and watch_obj._child_watch_set and (len(watch_obj._child_watch_set) > 0): 
 			raise ValueError("Cannot remove tree roots with live children individually")
 
 		ret = inotify_rm_watch(self._inotify_fd, watch_obj._wd)
 		if ret == -1:
 			raise OSError("Unable to remove watch %s:%s" % (watch_obj, libc.string.strerror(libc.errno.errno)))
 
-		if watch_obj._is_tree and not watch_obj._is_tree_root:
+		# discarding from _child_watch_set is optional, so that when
+		# we remove tree watches, we don't modify the set during iteration
+		# the whole set will disappear anyway, so this is no problem.
+		if discard and watch_obj._is_tree and not watch_obj._is_tree_root:
 			watch_obj._tree_root_watch._child_watch_set.discard(watch_obj)
 		
 		self._wd_list[watch_obj._wd] = None
 
 	def rm_tree_watch(self, root_watch_obj):
 		for child_watch in root_watch_obj._child_watch_set:
-			self.rm_watch(child_watch)
-			root_watch_obj._child_watch_set.discard(child_watch)
+			self.rm_watch(child_watch, discard=False)
 
+		root_watch_obj._child_watch_set = None
 		self.rm_watch(root_watch_obj)	
 
 	def gen_events(self):
@@ -295,7 +295,12 @@ class EventDispatcher(object):
 				)
 
 				if event_ptr.len > 0:
+
+					# event_ptr.name is padded with 0s that will confuse later string comparisons
+					# in Python if not stripped
 					event_name = event_ptr.name[:event_ptr.len]
+					nul_chr_i = event_name.find(chr(0))
+					event_name = event_name[:nul_chr_i]
 					e.name = event_name
 					full_event_path = os.path.join(matched_watch_obj.path, event_name)
 					e.full_event_path = full_event_path
@@ -307,10 +312,6 @@ class EventDispatcher(object):
 				#NOTE - there is an unavoidable race condition here - we can't
 				# guarantee that we watch the newly created file/dir before
 				# the events we want to watch occur on it.
-
-				# It may be possible to "catch up" missed creations by comparing
-				# ctimes and listdir(), but there is no guarantee that such files
-				# have not already been removed!
 				if matched_watch_obj._is_tree and (event_ptr.mask & IN_CREATE) > 0:
 					new_watch_obj = Watch(
 						path=full_event_path,
@@ -337,11 +338,20 @@ class EventDispatcher(object):
 		self._closed = True
 
 		for cur_watch in self._wd_list:
-			if cur_watch._is_tree_root:
-				self.rm_tree_watch(cur_watch)
-			else:
-				self.rm_watch(cur_watch)
+			if cur_watch is not None:
+				if cur_watch._is_tree_root:
+					self.rm_tree_watch(cur_watch)
+					#DEBUG
+					#for wd, cur_watch in enumerate(self._wd_list):
+						#print "%d, %s" % (wd, cur_watch)
+		
+				# if the current watch won't be removed as part of 
+				# removing a tree watch, it can be safely removed
+				# now
+				if not cur_watch._is_tree:
+					self.rm_watch(cur_watch)
 
+		self._wd_list = None
 		posix.unistd.close(self._inotify_fd)	
 			
 		
