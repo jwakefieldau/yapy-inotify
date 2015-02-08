@@ -6,11 +6,6 @@ cimport libc.string
 import os
 import stat
 
-#TODO - add method to EventDispatcher to permit removing all watches and
-#       stopping iteration? - close()
-
-# masks - from inotify.h
-
 IN_ACCESS 	=	0x00000001      #File was accessed 
 IN_MODIFY	=	0x00000002      # File was modified 
 IN_ATTRIB       =       0x00000004      # Metadata changed 
@@ -161,20 +156,12 @@ class EventDispatcher(object):
 		watch_obj._wd = wd
 		self._wd_list[wd] = watch_obj
 
-		#DEBUG
-		print "added watch with wd: %d, path: %s, mask: %x" % (wd, watch_obj.path, watch_obj.mask)
-
 		# if a child tree watch, update the root's set of child wds
 		if watch_obj._is_tree and not watch_obj._is_tree_root:
 			watch_obj._tree_root_watch._child_watch_set.add(watch_obj)	
 			
 
 	def add_tree_watch(self, root_watch_obj):
-		# extract the file and dir mask from the mask passed, OR IN_CREATE with the dir mask
-		# so that new dirs can be picked up and masks added to files and subdirs
-		# walk the tree rooted at path and add watches
-
-		#NOTE - NEW BEHAVIOUR
 		# * raise ValueError if root is not a dir
 		# * OR input mask with IN_CREATE
 		# * descend through dir tree and add watch with mask to any *directories*
@@ -207,14 +194,9 @@ class EventDispatcher(object):
 		for (root, dirnames, filenames) in os.walk(root_watch_obj.path):
 			for dirname in dirnames:
 				dir_path = os.path.join(root, dirname)
-
-				#DEBUG
-				print "About to add watch with mask %x to dir with path %s" % (root_watch_obj.child_mask, dir_path)
-
 				new_watch_obj = Watch(mask=root_watch_obj.child_mask, path=dir_path, _is_tree=True, _tree_root_watch=root_watch_obj)
 				self.add_watch(new_watch_obj)
 
-					
 
 	def rm_watch(self, watch_obj, discard=True):
 		if (watch_obj._is_tree_root) and watch_obj._child_watch_set and (len(watch_obj._child_watch_set) > 0): 
@@ -258,19 +240,12 @@ class EventDispatcher(object):
 			# events
 			read_len = posix.unistd.read(self._inotify_fd, read_buf, 4096)
 
-			#DEBUG
-			print "read_len: %d" % read_len
-
 			if read_len == -1:
 				raise IOError("error reading inotify data: %s" % (libc.string.strerror(libc.errno.errno)))
 
 			processed_len = 0
 			event_ptr = <inotify_event *>&read_buf[0]
 			while (processed_len < read_len): 
-
-				#DEBUG
-				print "event struct read in gen_events(): len:%d name:%s wd:%d mask:%d (%s)" % (event_ptr.len, event_ptr.name if event_ptr.len > 0 else '(null)', event_ptr.wd, event_ptr.mask, render_mask_str(event_ptr.mask))
-
 				matched_watch_obj = self._wd_list[event_ptr.wd]
 
 
@@ -341,9 +316,6 @@ class EventDispatcher(object):
 			if cur_watch is not None:
 				if cur_watch._is_tree_root:
 					self.rm_tree_watch(cur_watch)
-					#DEBUG
-					#for wd, cur_watch in enumerate(self._wd_list):
-						#print "%d, %s" % (wd, cur_watch)
 		
 				# if the current watch won't be removed as part of 
 				# removing a tree watch, it can be safely removed
