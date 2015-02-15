@@ -77,6 +77,10 @@ def render_mask_str(input_mask):
 
 
 class Event(object):
+	"""
+	Represents an inotify event that has occurred on an active Watch
+	"""
+
 	_wd = None
 	mask = None
 	cookie = None
@@ -88,6 +92,13 @@ class Event(object):
 		set_attrs_from_kwargs(self, **kwargs)
 
 class Watch(object):
+	"""
+	Represents an inotify watch.  If _is_tree is True, **CLARIFY THIS**.
+	If _is_tree_root is True, then this watch will by applied via inotify to 
+	any pre-existing and newly created objects under path.  The mask will be ORed
+	with IN_CREATE to facilitate this.
+	"""
+
 	mask = None
 	child_mask = None
 	path = None
