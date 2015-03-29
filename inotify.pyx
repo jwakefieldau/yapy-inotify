@@ -93,10 +93,12 @@ class Event(object):
 
 class Watch(object):
 	"""
-	Represents an inotify watch.  If _is_tree is True, **CLARIFY THIS**.
+	Represents an inotify watch.  
+
 	If _is_tree_root is True, then this watch will by applied via inotify to 
 	any pre-existing and newly created objects under path.  The mask will be ORed
-	with IN_CREATE to facilitate this.
+	with IN_CREATE to facilitate this.  These new watches have _is_tree = True and
+	_is_tree_root set to the watch object that set the initial watch. 
 	"""
 
 	mask = None
@@ -136,6 +138,19 @@ class Watch(object):
 
 
 class EventDispatcher(object):
+	"""
+	EventDispatcher provides the interface to add or remove Watches from the system
+	(via inotify), and generate Events from them.
+
+	If ioerror_on_unmount or ioerror_on_q_overflow are True, then IOError will
+	be raised if those events (IN_UNMOUNT or IN_Q_OVERFLOW) should be read from 
+	inotify, rather than simply yielding Event objects for the consumer. 
+
+	If yield_ignore is True, then IN_IGNORE events will be yielded by the
+	generator to the consumer.
+
+	"""
+	
 	_wd_list = []
 	_inotify_fd = None
 	_closed = False
@@ -158,6 +173,10 @@ class EventDispatcher(object):
 			raise OSError("Unable to initialise inotify, %s" % libc.string.strerror(libc.errno.errno))
 		
 	def add_watch(self, watch_obj):
+		"""
+		Add the Watch watch_obj and apply via inotify
+		"""
+	
 		wd = inotify_add_watch(self._inotify_fd, watch_obj.path, watch_obj.mask)
 
 		if wd == -1:
@@ -173,6 +192,18 @@ class EventDispatcher(object):
 			
 
 	def add_tree_watch(self, root_watch_obj):
+		"""
+		Add the Watch root_watch_obj, being specified to watch a directory, 
+		and apply via inotify; any sub-directories existing in the directory (recursively)
+		will have Watches added for them and any new directories created subsequently
+		during Event generation will have Watches added for them.  
+
+		Only directories are watched in this scenario as it has the same effect 
+		as watching all files in the directory.  If root_watch_obj does not 
+		specify a directory, ValueError will be raised.
+
+		"""
+
 		# * raise ValueError if root is not a dir
 		# * OR input mask with IN_CREATE
 		# * descend through dir tree and add watch with mask to any *directories*
