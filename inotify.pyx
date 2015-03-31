@@ -241,6 +241,18 @@ class EventDispatcher(object):
 
 
 	def rm_watch(self, watch_obj, discard=True):
+		"""
+		Remove a Watch, and optionally, discard it from its tree root watch's set 
+		of child watches (default).  The case for not discarding is when removing
+		a tree watch, where we remove child watches iteratively and must avoid
+		modifying the set of child watches until afterward (as in .rm_tree_watch()).
+
+		If watch_obj is a tree root, and its set of child watches is not empty,
+		ValueError will be raised; use .rm_tree_watch() to remove these.
+
+		If the call via inotify to remove the watch fails, OSError will be raised.
+		"""
+		
 		if (watch_obj._is_tree_root) and watch_obj._child_watch_set and (len(watch_obj._child_watch_set) > 0): 
 			raise ValueError("Cannot remove tree roots with live children individually")
 
@@ -257,6 +269,12 @@ class EventDispatcher(object):
 		self._wd_list[watch_obj._wd] = None
 
 	def rm_tree_watch(self, root_watch_obj):
+		"""
+		Remove a tree root watch and all its children.  .rm_watch() is called with
+		discard=False for each child so that the child watch set is not modified
+		during iteration.
+		"""
+
 		for child_watch in root_watch_obj._child_watch_set:
 			self.rm_watch(child_watch, discard=False)
 
@@ -264,6 +282,17 @@ class EventDispatcher(object):
 		self.rm_watch(root_watch_obj)	
 
 	def gen_events(self):
+		"""
+		Read from inotify and generate (yield) Events until .close() has been called.
+		If the matching Watch is a tree watch and the Event is for directory creation,
+		add a new tree Watch with the same root.
+
+		TODO - add dir check - currently would add Watches for all new files
+
+		.... ioerror on unmount, q overflow ....
+		"""
+
+		
 		cdef char read_buf[4096]
 		cdef inotify_event *event_ptr
 		cdef ssize_t read_len = 0
@@ -290,8 +319,6 @@ class EventDispatcher(object):
 			while (processed_len < read_len): 
 				matched_watch_obj = self._wd_list[event_ptr.wd]
 
-
-				#NOTE - NEW BEHAVIOUR
 				# * if event_name is None, we know the event occurred on the watched
 				# directory itself, rather than a file within it
 				# * only add new watches for created directories; we will get events
