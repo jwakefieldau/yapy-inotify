@@ -102,17 +102,20 @@ class Watch(object):
 	"""
 
 	mask = None
+	_effective_mask = None
 	child_mask = None
+	_effective_child_mask = None
 	path = None
 	_wd = None
 	_is_tree = False
 	_is_tree_root = False
 	_tree_root_watch = None
-
 	_child_watch_set = set()
 
 	def __init__(self, **kwargs):
 		set_attrs_from_kwargs(self, **kwargs)
+		if self._effective_mask is None:
+			self._effective_mask = self.mask
 
 	# render string representing watch, eg:
 	# [+(for tree):path:mask0|mask1...|maskn
@@ -146,9 +149,6 @@ class EventDispatcher(object):
 	be raised if those events (IN_UNMOUNT or IN_Q_OVERFLOW) should be read from 
 	inotify, rather than simply yielding Event objects for the consumer. 
 
-	If yield_ignore is True, then IN_IGNORE events will be yielded by the
-	generator to the consumer.
-
 	"""
 	
 	_wd_list = []
@@ -156,7 +156,6 @@ class EventDispatcher(object):
 	_closed = False
 	ioerror_on_unmount = True 
 	ioerror_on_q_overflow = True
-	yield_ignore = False
 
 	def __init__(self, **kwargs):
 
@@ -177,7 +176,7 @@ class EventDispatcher(object):
 		Add the Watch watch_obj and apply via inotify
 		"""
 	
-		wd = inotify_add_watch(self._inotify_fd, watch_obj.path, watch_obj.mask)
+		wd = inotify_add_watch(self._inotify_fd, watch_obj.path, watch_obj._effective_mask)
 
 		if wd == -1:
 			raise OSError("Unable to add watch %s, error: %s" % (watch_obj, libc.string.strerror(libc.errno.errno)))
@@ -190,6 +189,24 @@ class EventDispatcher(object):
 		if watch_obj._is_tree and not watch_obj._is_tree_root:
 			watch_obj._tree_root_watch._child_watch_set.add(watch_obj)	
 			
+	def _add_subdir_child_watches(self, parent_watch_obj):
+		"""
+		Add the Watch objects for any already-existing subdirectories of
+		parent_watch_obj.path
+		"""
+
+		for (root, dirnames, filenames) in os.walk(parent_watch_obj.path):
+			for dirname in dirnames:
+				dir_path = os.path.join(root, dirname)
+				new_watch_obj = Watch(
+					mask=parent_watch_obj.child_mask,
+					_effective_mask=parent_watch_obj._effective_child_mask if parent_watch_obj._is_tree_root else parent_watch_obj._effective_mask,
+					path=dir_path,
+					_is_tree=True,
+					_tree_root_watch=parent_watch_obj if parent_watch_obj._is_tree_root else parent_watch_obj._tree_root_watch,
+				)
+				self.add_watch(new_watch_obj)
+
 
 	def add_tree_watch(self, root_watch_obj):
 		"""
@@ -217,28 +234,24 @@ class EventDispatcher(object):
 
 		root_watch_obj._is_tree = True
 		root_watch_obj._is_tree_root = True
-		root_watch_obj.mask |= IN_CREATE
+		root_watch_obj._effective_mask |= IN_CREATE
 
 		# watching deletion on subdirs means no need to watch self-deletion on anything except
 		# the root
 		if root_watch_obj.mask & IN_DELETE_SELF:
-			root_watch_obj.mask |= IN_DELETE
-			root_watch_obj.child_mask = root_watch_obj.mask ^ IN_DELETE_SELF
-
+			root_watch_obj._effective_mask |= IN_DELETE
+			root_watch_obj._effective_child_mask = root_watch_obj._effective_mask ^ IN_DELETE_SELF
 		else:
-			root_watch_obj.child_mask = root_watch_obj.mask
+			root_watch_obj._effective_child_mask = root_watch_obj._effective_mask
+
+		root_watch_obj.child_mask = root_watch_obj.mask
 		
 		if not stat.S_ISDIR(os.stat(root_watch_obj.path).st_mode):
 			raise ValueError("Can't root a tree watch at %s as it is not a directory" % (root_watch_obj.path))
 		
 		self.add_watch(root_watch_obj)
-
-		for (root, dirnames, filenames) in os.walk(root_watch_obj.path):
-			for dirname in dirnames:
-				dir_path = os.path.join(root, dirname)
-				new_watch_obj = Watch(mask=root_watch_obj.child_mask, path=dir_path, _is_tree=True, _tree_root_watch=root_watch_obj)
-				self.add_watch(new_watch_obj)
-
+		self._add_subdir_child_watches(root_watch_obj)
+		
 
 	def rm_watch(self, watch_obj, discard=True):
 		"""
@@ -331,6 +344,8 @@ class EventDispatcher(object):
 				# of its argument.  Since .name is a char[] in libc, it is considered
 				# by sizeof() to occupy no space
 
+				# now that we have an Event object, use that rather than event_ptr where
+				# possible, to avoid bugs arising from confusion about where it points to
 				e = Event(
 					_wd=event_ptr.wd,
 					watch_obj=matched_watch_obj,
@@ -354,29 +369,52 @@ class EventDispatcher(object):
 					e.full_event_path = full_event_path
 
 				#NOTE - there is an unavoidable race condition here - we can't
-				# guarantee that we watch the newly created file/dir before
+				# guarantee that we watch the newly created dir before
 				# the events we want to watch occur on it.
-				if matched_watch_obj._is_tree and (event_ptr.mask & IN_CREATE) > 0:
+
+				#DEBUG
+				print "processing event - mask:%x, mwatched watch object mask: %x, path:%s" % (e.mask, matched_watch_obj.mask, e.full_event_path)
+				print "IN_CREATE | IN_ISDIR:%x" % (IN_CREATE | IN_ISDIR)
+
+				if matched_watch_obj._is_tree and (e.mask & (IN_CREATE | IN_ISDIR) >= (IN_CREATE | IN_ISDIR)): 
+
+					#DEBUG
+					print "about to add new Watch"
+
 					new_watch_obj = Watch(
 						path=full_event_path,
 						mask=matched_watch_obj.child_mask if matched_watch_obj._is_tree_root else matched_watch_obj.mask,
+						_effective_mask=matched_watch_obj._effective_child_mask if matched_watch_obj._is_tree_root else matched_watch_obj._effective_mask,
 						_is_tree=True,
-						_tree_root_watch=matched_watch_obj if matched_watch_obj._is_tree_root else matched_watch_obj._tree_root_watch
+						_tree_root_watch=matched_watch_obj if matched_watch_obj._is_tree_root else matched_watch_obj._tree_root_watch,
 					)
 					self.add_watch(new_watch_obj)
 
-				processed_len += (sizeof(inotify_event) + event_ptr.len)
-				event_ptr = <inotify_event *>&read_buf[processed_len]
+					#NOTE - some user actions (eg: mkdir -p) are known to win the race against IN_CREATE sometimes,
+					# so walk through the new dir and add watches to any subdirs that already exist
+					# at this point
+					#TODO - this doesn't work yet
+					self._add_subdir_child_watches(new_watch_obj)
+
 				
-				if (event_ptr.mask & IN_UNMOUNT) > 0 and self.ioerror_on_unmount:
+				if (e.mask & IN_UNMOUNT) > 0 and self.ioerror_on_unmount:
 					raise IOError("Backing filesystem for %s unmounted" % (full_event_path))
 
-				elif (event_ptr.mask & IN_Q_OVERFLOW) > 0 and self.ioerror_on_q_overflow:
+				elif (e.mask & IN_Q_OVERFLOW) > 0 and self.ioerror_on_q_overflow:
 					raise IOError('Inotify event queue overflowed')
 				
 				else:
-					if not ((event_ptr.mask & IN_IGNORED) > 0 and not (self.yield_ignore)):
-						yield e	
+					# yield the event only if its mask matches the user mask; eg: don't yield
+					# IN_CREATEs that are only watched to make a watch recursive, or
+					# IN_IGNORE, etc		
+					if (e.mask & matched_watch_obj.mask) > 0:
+						yield e
+
+				# move event_ptr to the start of the next event - this should be the
+				# last thing we do in each iteration
+				processed_len += (sizeof(inotify_event) + event_ptr.len)
+				event_ptr = <inotify_event *>&read_buf[processed_len]
+
 
 	def close(self):
 		self._closed = True
