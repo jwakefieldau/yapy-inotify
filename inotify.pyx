@@ -195,11 +195,12 @@ class EventDispatcher(object):
 		parent_watch_obj.path
 		"""
 
+
 		for (root, dirnames, filenames) in os.walk(parent_watch_obj.path):
 			for dirname in dirnames:
 				dir_path = os.path.join(root, dirname)
 				new_watch_obj = Watch(
-					mask=parent_watch_obj.child_mask,
+					mask=parent_watch_obj.child_mask if parent_watch_obj._is_tree_root else parent_watch_obj.mask,
 					_effective_mask=parent_watch_obj._effective_child_mask if parent_watch_obj._is_tree_root else parent_watch_obj._effective_mask,
 					path=dir_path,
 					_is_tree=True,
@@ -371,16 +372,7 @@ class EventDispatcher(object):
 				#NOTE - there is an unavoidable race condition here - we can't
 				# guarantee that we watch the newly created dir before
 				# the events we want to watch occur on it.
-
-				#DEBUG
-				print "processing event - mask:%x, mwatched watch object mask: %x, path:%s" % (e.mask, matched_watch_obj.mask, e.full_event_path)
-				print "IN_CREATE | IN_ISDIR:%x" % (IN_CREATE | IN_ISDIR)
-
 				if matched_watch_obj._is_tree and (e.mask & (IN_CREATE | IN_ISDIR) >= (IN_CREATE | IN_ISDIR)): 
-
-					#DEBUG
-					print "about to add new Watch"
-
 					new_watch_obj = Watch(
 						path=full_event_path,
 						mask=matched_watch_obj.child_mask if matched_watch_obj._is_tree_root else matched_watch_obj.mask,
@@ -393,7 +385,6 @@ class EventDispatcher(object):
 					#NOTE - some user actions (eg: mkdir -p) are known to win the race against IN_CREATE sometimes,
 					# so walk through the new dir and add watches to any subdirs that already exist
 					# at this point
-					#TODO - this doesn't work yet
 					self._add_subdir_child_watches(new_watch_obj)
 
 				
