@@ -423,5 +423,8 @@ class EventDispatcher(object):
 
 		self._wd_list = None
 		posix.unistd.close(self._inotify_fd)	
+
+	def is_closed(self):
+		return self._closed
 			
 		

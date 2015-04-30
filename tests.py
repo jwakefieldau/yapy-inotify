@@ -1,5 +1,10 @@
 from unittest import TestCase
 
+import os
+import uuid
+
+from inotify import *
+
 # Test cases:
 
 # creation of file in directory
@@ -18,18 +23,29 @@ from unittest import TestCase
 # *** WHICH TESTS TO RUN FOR RECURSIVE DIR WATCH VS SINGLE FILE/DIR ? ***
 # if some tests have been done for single case, do they need to be re-done for recursive?
 
-"""
 class InotifyTestCase(TestCase):
 
-	def _test_file_name(self):
-		# return a test file name that should be collision resistant,
-		# maybe test_file_root_dir/test_file.PID.UUID4 ?
-
 	def setUp(self):
-		# make test file root dir
-		# create test file name
-		# create eventdispatcher
+		self.test_root_path = os.path.join('/tmp', "python-inotify_test_pid-%d_%s" % (os.getpid(), uuid.uuid4())) 	
+		os.mkdir(self.test_root_path)
+		self.event_dispatcher = EventDispatcher()
 
-	## specific tests
-"""		
+	def tearDown(self):
+		# remove test file root dir and anything in it
+		for (cur_dir_name, subdirs, files) in os.walk(self.test_root_path, topdown=False):
+			for cur_subdir_name in subdirs:
+				os.rmdir(os.path.join(cur_dir_name, cur_subdir_name))
+			for cur_file_name in files:
+				os.unlink(os.path.join(cur_dir_name, cur_file_name))
+		os.rmdir(self.test_root_path)
 
+
+class CreateTestCase(InotifyTestCase):
+
+	def test_create(self):
+		test_watch = Watch(mask=IN_CREATE, path=os.path.join(self.test_root_path, 'create_test'))
+		self.event_dispatcher.add_watch(test_watch)
+		##NOTE - we need to have a way for the test to fail if no event is yielded within time t
+		## * multithreading?  use non-blocking IO?
+		## ** even if we did use non-blocking IO we would still need to test that
+		##    that aspect of the code worked
