@@ -49,3 +49,11 @@ class CreateTestCase(InotifyTestCase):
 		## * multithreading?  use non-blocking IO?
 		## ** even if we did use non-blocking IO we would still need to test that
 		##    that aspect of the code worked
+
+		#TODO - * start worker process, worker proccess iterates on event generator
+		# until it gets the appropriate IN_CREATE Event
+		# * parent process joins with an appropriate timeout, then checks
+		# the worker process exit code
+		# * if the worker process exit code is None, then join() timed out,
+		# and we should fail the test.  Otherwise, check for error/non-error
+		# exit code
