@@ -1,7 +1,9 @@
 from unittest import TestCase
+from multiprocessing import Process
 
 import os
 import uuid
+import sys
 
 from inotify import *
 
@@ -24,6 +26,11 @@ from inotify import *
 # if some tests have been done for single case, do they need to be re-done for recursive?
 
 class InotifyTestCase(TestCase):
+	
+	# In testing, events should take no more than this many seconds to be generated,
+	# if they do, the join of the worker process should time out and the parent
+	# should terminate it
+	worker_timeout = 3
 
 	def setUp(self):
 		self.test_root_path = os.path.join('/tmp', "python-inotify_test_pid-%d_%s" % (os.getpid(), uuid.uuid4())) 	
@@ -39,21 +46,43 @@ class InotifyTestCase(TestCase):
 				os.unlink(os.path.join(cur_dir_name, cur_file_name))
 		os.rmdir(self.test_root_path)
 
+	def _event_worker(self, test_watch):
+		# test for generation of event that matches
+		# test_watch, within the context of a worker process.
+		# exit with success if one is generated, if one is
+		# not, rely on the parent to kill us 
+		g = self.event_dispatcher.gen_events() 
+		for event in g:
+			if event.watch_obj == test_watch:
+				g.close()
+		sys.exit(0)		
+
+	def test_event_with_worker(self, test_watch, trigger_event_callable, trigger_args=(), trigger_kwargs={}):
+		# use a worker process to add watch to event_dispatcher
+		# and iterate over the event generator until an event
+		# matching the watch is generated, then exit with success.
+		# parent process joins the worker with a timeout, after
+		# the join, if the worker exited with success, then the
+		# event must have been generated within the timeout and we return True, if
+		# the exitcode is None, the join must have timed out, so
+		# the parent terminates the worker and returns False	
+
+		worker_p = Process(group=None, target=self._event_worker, name=None, args=(test_watch,))
+		worker_p.start()
+		trigger_event_callable(*trigger_args, **trigger_kwargs)
+		worker_p.join(timeout=self.worker_timeout)
+		if worker_p.exitcode is None:
+			worker_p.terminate()
+		return (worker_p.exitcode == 0)	
+
 
 class CreateTestCase(InotifyTestCase):
 
-	def test_create(self):
-		test_watch = Watch(mask=IN_CREATE, path=os.path.join(self.test_root_path, 'create_test'))
-		self.event_dispatcher.add_watch(test_watch)
-		##NOTE - we need to have a way for the test to fail if no event is yielded within time t
-		## * multithreading?  use non-blocking IO?
-		## ** even if we did use non-blocking IO we would still need to test that
-		##    that aspect of the code worked
+	def _create_for_test(self, path):
+		with open(path, 'wt') as f:
+			f.write("trololololololol\n")
 
-		#TODO - * start worker process, worker proccess iterates on event generator
-		# until it gets the appropriate IN_CREATE Event
-		# * parent process joins with an appropriate timeout, then checks
-		# the worker process exit code
-		# * if the worker process exit code is None, then join() timed out,
-		# and we should fail the test.  Otherwise, check for error/non-error
-		# exit code
+	def test_create(self):
+		test_path = os.path.join(self.test_root_path, 'create_test')
+		test_watch = Watch(mask=IN_CREATE, path=test_path)
+		assertTrue(self.test_event_with_worker(test_watch, self._create_for_test, trigger_args=(test_path,)))
