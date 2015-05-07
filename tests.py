@@ -1,9 +1,11 @@
-from unittest import TestCase
+#!/usr/bin/python
+
 from multiprocessing import Process
 
 import os
 import uuid
 import sys
+import unittest
 
 from inotify import *
 
@@ -25,7 +27,7 @@ from inotify import *
 # *** WHICH TESTS TO RUN FOR RECURSIVE DIR WATCH VS SINGLE FILE/DIR ? ***
 # if some tests have been done for single case, do they need to be re-done for recursive?
 
-class InotifyTestCase(TestCase):
+class InotifyTestCase(unittest.TestCase):
 	
 	# In testing, events should take no more than this many seconds to be generated,
 	# if they do, the join of the worker process should time out and the parent
@@ -57,7 +59,7 @@ class InotifyTestCase(TestCase):
 				g.close()
 		sys.exit(0)		
 
-	def test_event_with_worker(self, test_watch, trigger_event_callable, trigger_args=(), trigger_kwargs={}):
+	def watchdog_event_worker(self, test_watch, trigger_event_callable, trigger_args=(), trigger_kwargs={}):
 		# use a worker process to add watch to event_dispatcher
 		# and iterate over the event generator until an event
 		# matching the watch is generated, then exit with success.
@@ -85,4 +87,13 @@ class CreateTestCase(InotifyTestCase):
 	def test_create(self):
 		test_path = os.path.join(self.test_root_path, 'create_test')
 		test_watch = Watch(mask=IN_CREATE, path=test_path)
-		assertTrue(self.test_event_with_worker(test_watch, self._create_for_test, trigger_args=(test_path,)))
+		self.assertTrue(
+			self.watchdog_event_worker(
+				test_watch,
+				self._create_for_test,
+				trigger_args=(test_path,)
+			)
+		)
+
+if __name__ == '__main__':
+	unittest.main()
