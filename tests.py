@@ -1,6 +1,7 @@
 #!/usr/bin/python
 
 from multiprocessing import Process
+from multiprocessing import Event as PEvent
 
 import os
 import uuid
@@ -40,6 +41,7 @@ class InotifyTestCase(unittest.TestCase):
 		self.event_dispatcher = EventDispatcher()
 
 	def tearDown(self):
+		self.event_dispatcher.close()
 		# remove test file root dir and anything in it
 		for (cur_dir_name, subdirs, files) in os.walk(self.test_root_path, topdown=False):
 			for cur_subdir_name in subdirs:
@@ -48,15 +50,22 @@ class InotifyTestCase(unittest.TestCase):
 				os.unlink(os.path.join(cur_dir_name, cur_file_name))
 		os.rmdir(self.test_root_path)
 
-	def _event_worker(self, test_watch):
+	def _event_worker(self, test_watch, added_watch_event, got_event):
 		# test for generation of event that matches
 		# test_watch, within the context of a worker process.
 		# exit with success if one is generated, if one is
 		# not, rely on the parent to kill us 
+
+		self.event_dispatcher.add_watch(test_watch)
+		added_watch_event.set()
+
 		g = self.event_dispatcher.gen_events() 
 		for event in g:
 			if event.watch_obj == test_watch:
+				got_event.set()
 				g.close()
+
+		self.event_dispatcher.close()
 		sys.exit(0)		
 
 	def watchdog_event_worker(self, test_watch, trigger_event_callable, trigger_args=(), trigger_kwargs={}):
@@ -69,13 +78,26 @@ class InotifyTestCase(unittest.TestCase):
 		# the exitcode is None, the join must have timed out, so
 		# the parent terminates the worker and returns False	
 
-		worker_p = Process(group=None, target=self._event_worker, name=None, args=(test_watch,))
+		ret = False
+		added_watch_event = PEvent()
+		got_event = PEvent()
+		worker_p = Process(group=None, target=self._event_worker, name=None, args=(test_watch, added_watch_event, got_event,))
 		worker_p.start()
-		trigger_event_callable(*trigger_args, **trigger_kwargs)
-		worker_p.join(timeout=self.worker_timeout)
-		if worker_p.exitcode is None:
-			worker_p.terminate()
-		return (worker_p.exitcode == 0)	
+
+		#don't call this until after worker process has added watch 
+		if added_watch_event.wait(self.worker_timeout):
+			trigger_event_callable(*trigger_args, **trigger_kwargs)
+
+			if got_event.wait(self.worker_timeout):
+				ret = True
+
+			else:
+				worker_p.terminate()
+
+		else:
+			worker_p.terminate()			
+
+		return ret
 
 
 class CreateTestCase(InotifyTestCase):
@@ -85,15 +107,15 @@ class CreateTestCase(InotifyTestCase):
 			f.write("trololololololol\n")
 
 	def test_create(self):
-		test_path = os.path.join(self.test_root_path, 'create_test')
-		test_watch = Watch(mask=IN_CREATE, path=test_path)
-		self.assertTrue(
-			self.watchdog_event_worker(
+		test_file_path = os.path.join(self.test_root_path, 'create_test')
+		test_watch = Watch(mask=IN_CREATE, path=self.test_root_path)
+		worker_test_ret = self.watchdog_event_worker(
 				test_watch,
 				self._create_for_test,
-				trigger_args=(test_path,)
-			)
+				trigger_args=(test_file_path,)
 		)
+		self.assertTrue(worker_test_ret)
+
 
 if __name__ == '__main__':
 	unittest.main()
