@@ -50,6 +50,20 @@ class InotifyTestCase(unittest.TestCase):
 				os.unlink(os.path.join(cur_dir_name, cur_file_name))
 		os.rmdir(self.test_root_path)
 
+	def _write_for_test(self, path, create=True):
+		if create:
+			with open(path, 'wt') as f:
+				f.write("trololololololol\n")
+		else:
+			with open(path, 'wt') as f:
+				f.write("nangnangnangnangnangnang\n")
+			
+
+
+	def _read_for_test(self, path):
+		with open(path, 'rt') as f:
+			s = f.read()
+
 	def _event_worker(self, test_watch, added_watch_event, got_event):
 		# test for generation of event that matches
 		# test_watch, within the context of a worker process.
@@ -59,8 +73,15 @@ class InotifyTestCase(unittest.TestCase):
 		self.event_dispatcher.add_watch(test_watch)
 		added_watch_event.set()
 
+		#DEBUG
+		print "Added watch %s" % test_watch
+
 		g = self.event_dispatcher.gen_events() 
 		for event in g:
+
+			#DEBUG
+			print "Got event %s" % event
+
 			if event.watch_obj == test_watch:
 				got_event.set()
 				g.close()
@@ -99,22 +120,75 @@ class InotifyTestCase(unittest.TestCase):
 
 		return ret
 
+#TODO - add test_*_tree() methods to each test case class
+# move test_*() bodies out to other methods to wrap common
+# tree/non-tree code
 
 class CreateTestCase(InotifyTestCase):
-
-	def _create_for_test(self, path):
-		with open(path, 'wt') as f:
-			f.write("trololololololol\n")
 
 	def test_create(self):
 		test_file_path = os.path.join(self.test_root_path, 'create_test')
 		test_watch = Watch(mask=IN_CREATE, path=self.test_root_path)
 		worker_test_ret = self.watchdog_event_worker(
 				test_watch,
-				self._create_for_test,
+				self._write_for_test,
 				trigger_args=(test_file_path,)
 		)
 		self.assertTrue(worker_test_ret)
+
+class DeleteTestCase(InotifyTestCase):
+
+	def test_delete(self):
+		test_file_path = os.path.join(self.test_root_path, 'delete_test')
+		self._write_for_test(test_file_path)
+		test_watch = Watch(mask=IN_DELETE, path=self.test_root_path)
+		worker_test_ret = self.watchdog_event_worker(
+			test_watch,
+			os.unlink,
+			trigger_args=(test_file_path,)
+		)
+		self.assertTrue(worker_test_ret)
+
+class AccessTestCase(InotifyTestCase):
+
+	def test_access(self):
+		test_file_path = os.path.join(self.test_root_path, 'access_test')
+		self._write_for_test(test_file_path)
+		test_watch = Watch(mask=IN_ACCESS, path=self.test_root_path)
+		worker_test_ret = self.watchdog_event_worker(
+			test_watch,
+			self._read_for_test,
+			trigger_args=(test_file_path,)
+		)
+		self.assertTrue(worker_test_ret)
+
+class ModifyTestCase(InotifyTestCase):
+
+	def test_modify(self):
+		test_file_path = os.path.join(self.test_root_path, 'modify_test')
+		self._write_for_test(test_file_path)
+		test_watch = Watch(mask=IN_MODIFY, path=self.test_root_path)
+		worker_test_ret = self.watchdog_event_worker(
+			test_watch,
+			self._write_for_test,
+			trigger_args=(test_file_path, False,)
+		)
+		self.assertTrue(worker_test_ret)
+
+class CloseTestCase(InotifyTestCase):
+	
+	def test_close(self):
+		test_file_path = os.path.join(self.test_root_path, 'close_test')
+		test_watch = Watch(mask=IN_CLOSE, path=self.test_root_path)
+		worker_test_ret = self.watchdog_event_worker(
+			test_watch,
+			self._write_for_test,
+			trigger_args=(test_file_path,)
+		)
+		self.assertTrue(worker_test_ret)
+
+
+
 
 
 if __name__ == '__main__':
