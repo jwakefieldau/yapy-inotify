@@ -266,13 +266,21 @@ class EventDispatcher(object):
 
 		If the call via inotify to remove the watch fails, OSError will be raised.
 		"""
-		
+
 		if (watch_obj._is_tree_root) and watch_obj._child_watch_set and (len(watch_obj._child_watch_set) > 0): 
 			raise ValueError("Cannot remove tree roots with live children individually")
 
+		#NOTE - is there a better way to deal with already-removed files than to
+		# stat them here and avoid calling inotify if they're removed?
+		# Should we catch the exception and then stat?  Otherwise, potential
+		# race between stat and inotify
 		ret = inotify_rm_watch(self._inotify_fd, watch_obj._wd)
 		if ret == -1:
-			raise OSError("Unable to remove watch %s:%s" % (watch_obj, libc.string.strerror(libc.errno.errno)))
+			# invalid argument - most likely file deleted, keep on trucking
+			if libc.errno.errno == libc.errno.EINVAL:
+				pass
+			else:	
+				raise OSError("Unable to remove watch %s:%s" % (watch_obj, libc.string.strerror(libc.errno.errno)))
 
 		# discarding from _child_watch_set is optional, so that when
 		# we remove tree watches, we don't modify the set during iteration
@@ -300,8 +308,6 @@ class EventDispatcher(object):
 		Read from inotify and generate (yield) Events until .close() has been called.
 		If the matching Watch is a tree watch and the Event is for directory creation,
 		add a new tree Watch with the same root.
-
-		TODO - add dir check - currently would add Watches for all new files
 
 		.... ioerror on unmount, q overflow ....
 		"""
@@ -386,7 +392,6 @@ class EventDispatcher(object):
 					# so walk through the new dir and add watches to any subdirs that already exist
 					# at this point
 					self._add_subdir_child_watches(new_watch_obj)
-
 				
 				if (e.mask & IN_UNMOUNT) > 0 and self.ioerror_on_unmount:
 					raise IOError("Backing filesystem for %s unmounted" % (full_event_path))

@@ -17,3 +17,5 @@ print "added tree watch %s" % w
 
 for event in ed.gen_events():
 	print "%s,%x,%s,%x" % (event.name, event.mask, event.full_event_path, event.watch_obj.mask)
+	if event.full_event_path == '/tmp/foo/bar/baz':
+		ed.rm_watch(event.watch_obj)
