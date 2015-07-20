@@ -6,6 +6,8 @@ cimport libc.string
 import os
 import stat
 
+#TODO - control access to '_' private members properly with getters and setters?
+
 IN_ACCESS 	=	0x00000001      #File was accessed 
 IN_MODIFY	=	0x00000002      # File was modified 
 IN_ATTRIB       =       0x00000004      # Metadata changed 
@@ -90,6 +92,16 @@ class Event(object):
 
 	def __init__(self, **kwargs):
 		set_attrs_from_kwargs(self, **kwargs)
+
+	def _render_str_rep(self):
+		return ':'.join([self.full_event_path, render_mask_str(self.mask)])
+
+	def __str__(self):
+		return str(self._render_str_rep())
+
+	def __unicode__(self):
+		return unicode(self._render_str_rep())
+
 
 class Watch(object):
 	"""
