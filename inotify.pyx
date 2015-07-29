@@ -201,12 +201,13 @@ class EventDispatcher(object):
 		if watch_obj._is_tree and not watch_obj._is_tree_root:
 			watch_obj._tree_root_watch._child_watch_set.add(watch_obj)	
 			
-	def _add_subdir_child_watches(self, parent_watch_obj):
+	def _gen_subdir_child_watches(self, parent_watch_obj, gen_events=False, gen_event_mask=None):
 		"""
 		Add the Watch objects for any already-existing subdirectories of
-		parent_watch_obj.path
+		parent_watch_obj.path.  If gen_events is true, yield an Event
+		object for any such subdir.  This is for cases where we call this
+		method to catch up any missed IN_CREATE | IN_ISDIR events.
 		"""
-
 
 		for (root, dirnames, filenames) in os.walk(parent_watch_obj.path):
 			for dirname in dirnames:
@@ -219,6 +220,21 @@ class EventDispatcher(object):
 					_tree_root_watch=parent_watch_obj if parent_watch_obj._is_tree_root else parent_watch_obj._tree_root_watch,
 				)
 				self.add_watch(new_watch_obj)
+
+				if gen_events:
+					yield (new_watch_obj,
+						Event(
+							_wd=new_watch_obj._wd,
+							watch_obj=new_watch_obj,
+							full_event_path=dir_path,
+							mask=gen_event_mask,
+							cookie=None
+						)
+					)
+				else:
+					yield (new_watch_obj, None)
+
+			
 
 
 	def add_tree_watch(self, root_watch_obj):
@@ -263,7 +279,10 @@ class EventDispatcher(object):
 			raise ValueError("Can't root a tree watch at %s as it is not a directory" % (root_watch_obj.path))
 		
 		self.add_watch(root_watch_obj)
-		self._add_subdir_child_watches(root_watch_obj)
+
+		for (cur_subdir_watch, _cur_event) in self._gen_subdir_child_watches(root_watch_obj):
+			self.add_watch(cur_subdir_watch)
+		
 		
 
 	def rm_watch(self, watch_obj, discard=True):
@@ -348,8 +367,23 @@ class EventDispatcher(object):
 
 			processed_len = 0
 			event_ptr = <inotify_event *>&read_buf[0]
-			while (processed_len < read_len): 
-				matched_watch_obj = self._wd_list[event_ptr.wd]
+
+			# check on each iteration that we haven't been closed, since we (potentially) yield on each iteration
+			while (processed_len < read_len) and not self._closed: 
+
+				#TODO -  How can self._wd_list be None here if it is
+				# set None in self.close() and we check self._closed?
+
+				# This is highly intermittent
+
+				#DEBUG
+				try:
+					matched_watch_obj = self._wd_list[event_ptr.wd]
+
+				except TypeError:
+					print "self._closed: %s" % self._closed
+					print "type(self._wd_list) %s" % (type(self._wd_list))
+					raise
 
 				# * if event_name is None, we know the event occurred on the watched
 				# directory itself, rather than a file within it
@@ -402,8 +436,16 @@ class EventDispatcher(object):
 
 					#NOTE - some user actions (eg: mkdir -p) are known to win the race against IN_CREATE sometimes,
 					# so walk through the new dir and add watches to any subdirs that already exist
-					# at this point
-					self._add_subdir_child_watches(new_watch_obj)
+					# at this point, yielding events for them too
+					for (catchup_dir_w, catchup_dir_e) in self._gen_subdir_child_watches(new_watch_obj, gen_events=True, gen_event_mask=e.mask):
+
+						# we could be closed inside this loop since we yield in it
+						if self._closed:
+							break
+
+						self.add_watch(catchup_dir_w)
+						yield catchup_dir_e
+						
 				
 				if (e.mask & IN_UNMOUNT) > 0 and self.ioerror_on_unmount:
 					raise IOError("Backing filesystem for %s unmounted" % (full_event_path))
