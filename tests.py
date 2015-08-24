@@ -4,14 +4,12 @@ from multiprocessing import Process
 from multiprocessing import Event as PEvent
 
 import os
+import shutil
 import uuid
 import sys
 import unittest
 
 from inotify import *
-
-#TODO - figure out why not all IN_CREATE events are read in the create tree 
-# test - some kind of buffer filling issue or similar?
 
 # Test cases:
 
@@ -33,9 +31,15 @@ from inotify import *
 # look at exceptional cases in inotify code ** 
 
 
-# create paths for a tree of dirs n levels deep and wide
+#TODO - docstrings for test case classes and methods
 
 class MakeTree(object):
+	"""
+	Iterable class to produce paths from a directory tree having a particular
+	root and subdirectories n deep and n wide, named 1..n eg: for n = 4,
+	root/1/2/3/4 and root/4/2/1/3 will be included in paths produced.
+	"""
+	
 	
 	def __init__(self, total_size, root_dir):
 		self.total_size = total_size
@@ -117,10 +121,13 @@ class MakeTree(object):
 		return self.__next__()
 		
 
-# *** WHICH TESTS TO RUN FOR RECURSIVE DIR WATCH VS SINGLE FILE/DIR ? ***
-# if some tests have been done for single case, do they need to be re-done for recursive?
-
 class InotifyTestCase(unittest.TestCase):
+	"""
+	Parent class for our test case classes; includes common setup/teardown code,
+	common test tasks (writing files, etc), methods for running tests in worker
+	processes that use multiprocessing Events to notify of test status, and can
+	be terminated by the parent on timeout.
+	"""
 	
 	# In testing, events should take no more than this many seconds to be generated,
 	# if they do, the join of the worker process should time out and the parent
@@ -128,19 +135,25 @@ class InotifyTestCase(unittest.TestCase):
 	worker_timeout = 10
 
 	def setUp(self):
+		"""
+		Create a subdirectory under /tmp for test files; for collision avoidance and 
+		easy identification later in the event that tearDown() failes to remove it, 
+		the name is /tmp/python-inotify_test_pid-$PID_$UUID4.  EventDispatcher is 
+		also instantiated here.
+		"""
+		
 		self.test_root_path = os.path.join('/tmp', "python-inotify_test_pid-%d_%s" % (os.getpid(), uuid.uuid4())) 	
 		os.mkdir(self.test_root_path)
 		self.event_dispatcher = EventDispatcher()
 
 	def tearDown(self):
+		"""
+		Close the EventDispatcher instance and remove test file dir (tree)
+		"""
+
 		self.event_dispatcher.close()
 		# remove test file root dir and anything in it
-		for (cur_dir_name, subdirs, files) in os.walk(self.test_root_path, topdown=False):
-			for cur_subdir_name in subdirs:
-				os.rmdir(os.path.join(cur_dir_name, cur_subdir_name))
-			for cur_file_name in files:
-				os.unlink(os.path.join(cur_dir_name, cur_file_name))
-		os.rmdir(self.test_root_path)
+		shutil.rmtree(self.test_root_path)
 
 	def _write_for_test(self, path, create=True):
 		if create:
@@ -167,21 +180,11 @@ class InotifyTestCase(unittest.TestCase):
 		else:
 			self.event_dispatcher.add_watch(test_watch)
 		added_watch_event.set()
-
-		#DEBUG
-		print "Added watch %s" % test_watch
-
 		num_seen_events = 0
 		for event in self.event_dispatcher.gen_events():
 
-			#DEBUG
-			print "Got event %s" % event
-
 			if (event.watch_obj._is_tree and event.watch_obj._tree_root_watch == test_watch) or event.watch_obj == test_watch:	 
 				num_seen_events += 1	
-
-				#DEBUG
-				print "number of events seen for this worker: %d" % num_seen_events
 
 			if num_seen_events >= num_event_threshold:
 				got_event.set()
@@ -196,34 +199,26 @@ class InotifyTestCase(unittest.TestCase):
 			self._write_for_test(write_file)		
 				
 
-	#TODO - this needs to support testing of recursive/tree watches 
-	# one way could be to pass a number of events that should be yielded,
-	# and pass that on to the worker, which counts how many events it 
-	# iterates over which is either related directly to the test_watch
-	# or whose watch is a child of the test_watch.
-
-	# eg:
-	# * we add tree watch to foo_dir
-	# * added_watch_event is set by worker
-	# * trigger_event_callable in parent runs os.makedirs() and writes foo_dir/bar/1, foo_dir/bar/baz/2, and foo_dir/quux/yes/no/up/down/3
-	# ** trigger_event_callable in this case might be eg: _tree_write_for_test()
-	# ** the trigger_args might be the list of dirs to create and the list of files to write
-	# * if worker iterates over the IN_CREATE events for these three files, it sets got_event and stops iterating, and exits
-	# * parent returns from waiting for got_event and passes the test
-
-	#NOTE ** is this part done now? **
-
-			
-
 	def watchdog_event_worker(self, test_watch, trigger_event_callable, is_tree_watch=False, num_event_threshold=1, trigger_args=(), trigger_kwargs={}):
-		# use a worker process to add watch to event_dispatcher
-		# and iterate over the event generator until an event
-		# matching the watch is generated, then exit with success.
-		# parent process joins the worker with a timeout, after
-		# the join, if the worker exited with success, then the
-		# event must have been generated within the timeout and we return True, if
-		# the exitcode is None, the join must have timed out, so
-		# the parent terminates the worker and returns False	
+		"""
+		Use a worker process to add watch to event_dispatcher
+		and iterate over the event generator until an event
+		matching the watch is generated, then exit with success.
+		parent process joins the worker with a timeout, after
+		the join, if the worker exited with success, then the
+		event must have been generated within the timeout and we return True, if
+		the exitcode is None, the join must have timed out, so
+		the parent terminates the worker and returns False.
+
+		If num_event_threshold is specified, the worker will only 
+		succeed if that many events are generated; this supports
+		testing of recursive tree watches and load testing generally.
+
+		trigger_event_callable will be called (with trigger_args and
+		trigger kwargs) in the parent context after the worker has 
+		added the watch, to perform whatever action triggers the kernel
+		to generate the event(s).
+		"""
 
 		ret = False
 		added_watch_event = PEvent()
@@ -238,21 +233,18 @@ class InotifyTestCase(unittest.TestCase):
 			if got_event.wait(self.worker_timeout):
 				ret = True
 
-			else:
-				worker_p.terminate()
-
-		else:
-			worker_p.terminate()			
+		worker_p.terminate()			
 
 		return ret
 
-#TODO - add test_*_tree() methods to each test case class
-# move test_*() bodies out to other methods to wrap common
-# tree/non-tree code
 
 class CreateTestCase(InotifyTestCase):
 
 	def test_create(self):
+		"""
+		Catch IN_CREATE for a single file
+		"""
+	
 		test_file_path = os.path.join(self.test_root_path, 'create_test')
 		test_watch = Watch(mask=IN_CREATE, path=self.test_root_path)
 		worker_test_ret = self.watchdog_event_worker(
@@ -263,16 +255,17 @@ class CreateTestCase(InotifyTestCase):
 		self.assertTrue(worker_test_ret)
 
 	def test_create_tree(self):
+		"""
+		Catch IN_CREATE for each file and directory in a tree to be created, using
+		a recursive tree watch
+		"""
+
 		test_file_root_path = os.path.join(self.test_root_path, 'create_tree_test')
 		write_file_names = ['foo', 'bar', 'baz']
 		write_file_paths = []
 		create_dir_paths = []
 
 		for dir_name in MakeTree(3, test_file_root_path):
-
-			#DEBUG
-			print "dir_name from MakeTree(): %s" % dir_name
-
 			create_dir_paths.append(dir_name)
 			for file_name in write_file_names:
 				write_file_paths.append(os.path.join(dir_name, file_name))
@@ -280,15 +273,7 @@ class CreateTestCase(InotifyTestCase):
 		test_tree_watch = Watch(mask=IN_CREATE, path=self.test_root_path)
 
 		#NOTE - we should see an IN_CREATE event for each dir creation and each file creation
-		# * dirs: 3^3 + 3^2 + 3^1 + 3^0 for dir tree (3 dirs at each of 3 levels plus root dir = 40
-		# * files: 3 * dirs = 120
-		# * total = 160
-		#NOTE - why does this come out wrong/inconsistent?
-
 		num_event_threshold = len(write_file_paths) + len(create_dir_paths) + 1
-
-		#DEBUG
-		print "num_event_threshold = len(write_file_paths): %d + len(create_dir_paths): %d" % (len(write_file_paths), len(create_dir_paths))
 
 		worker_test_ret = self.watchdog_event_worker(
 				test_tree_watch,
@@ -298,15 +283,16 @@ class CreateTestCase(InotifyTestCase):
 				trigger_args=(create_dir_paths, write_file_paths,),
 		)
 
-		#DEBUG
-		print "Expected to get %d events" % num_event_threshold
-
 		self.assertTrue(worker_test_ret)
 		
 
 class DeleteTestCase(InotifyTestCase):
 
 	def test_delete(self):
+		"""
+		Catch IN_DELETE for a single file
+		"""
+
 		test_file_path = os.path.join(self.test_root_path, 'delete_test')
 		self._write_for_test(test_file_path)
 		test_watch = Watch(mask=IN_DELETE, path=self.test_root_path)
@@ -317,9 +303,47 @@ class DeleteTestCase(InotifyTestCase):
 		)
 		self.assertTrue(worker_test_ret)
 
+	def test_delete_tree(self):
+		"""
+		Catch IN_DELETE for each file and directory in a tree to be created
+		and then deleted, using a recursive tree watch 
+		"""
+
+		test_file_root_path = os.path.join(self.test_root_path, 'delete_tree_test')
+		write_file_names = ['foo', 'bar', 'baz']
+		write_file_paths = []
+		create_dir_paths = []
+
+		for dir_name in MakeTree(3, test_file_root_path):
+			create_dir_paths.append(dir_name)
+			for file_name in write_file_names:
+				write_file_paths.append(os.path.join(dir_name, file_name))
+
+		self._tree_write_for_test(create_dir_paths, write_file_paths)
+
+		test_tree_watch = Watch(mask=IN_DELETE, path=self.test_root_path)
+
+		# we should get an IN_DELETE event for the root, each dir, and each file
+		num_event_threshold = len(create_dir_paths) + len(write_file_paths) + 1
+		
+		#shutil.rmtree removes everything in a directory tree - files and all
+		worker_test_ret = self.watchdog_event_worker(
+			test_tree_watch,
+			shutil.rmtree,
+			is_tree_watch=True,
+			num_event_threshold=num_event_threshold,
+			trigger_args=(test_file_root_path,)			
+		)
+		self.assertTrue(worker_test_ret)
+			
+
 class AccessTestCase(InotifyTestCase):
 
 	def test_access(self):
+		"""
+		Catch IN_ACCESS for a single file when it is opened for creation
+		"""
+
 		test_file_path = os.path.join(self.test_root_path, 'access_test')
 		self._write_for_test(test_file_path)
 		test_watch = Watch(mask=IN_ACCESS, path=self.test_root_path)
@@ -333,6 +357,11 @@ class AccessTestCase(InotifyTestCase):
 class ModifyTestCase(InotifyTestCase):
 
 	def test_modify(self):
+		"""
+		Catch IN_MODIFY for a single file when it is re-written after initial
+		creation
+		"""
+
 		test_file_path = os.path.join(self.test_root_path, 'modify_test')
 		self._write_for_test(test_file_path)
 		test_watch = Watch(mask=IN_MODIFY, path=self.test_root_path)
@@ -346,6 +375,10 @@ class ModifyTestCase(InotifyTestCase):
 class CloseTestCase(InotifyTestCase):
 	
 	def test_close(self):
+		"""
+		Catch IN_CLOSE for a single file when it is closed after creation
+		"""
+
 		test_file_path = os.path.join(self.test_root_path, 'close_test')
 		test_watch = Watch(mask=IN_CLOSE, path=self.test_root_path)
 		worker_test_ret = self.watchdog_event_worker(
@@ -355,7 +388,55 @@ class CloseTestCase(InotifyTestCase):
 		)
 		self.assertTrue(worker_test_ret)
 
+class ErrorTestCase(InotifyTestCase):
+	"""
+	Test that errors occur and are handled correctly under applicable
+	error conditions
+	"""
 
+	def test_watch_nonexistent(self):
+		"""
+		Test that OSError is raised if a watch is added for a nonexistent file.
+		Note that this test is done entirely in the context of a single process
+		since we can't forseeably be kept waiting forever.
+		"""
+
+		test_file_path = os.path.join(self.test_root_path, 'nonexistent_test')
+		test_watch = Watch(mask=IN_ACCESS, path=test_file_path)
+
+		#NOTE - this test is entirely done in the same process rather than
+		#a watchdog worker since the exception should be raised immediately;
+		#we can't be kept waiting forever
+		test_event_dispatcher = EventDispatcher()
+
+		with self.assertRaises(OSError):
+			test_event_dispatcher.add_watch(test_watch)
+
+	def test_watch_remove_file_removed(self):
+		"""
+		Test that the removal of a watch on a file that has been removed after
+		it was watched is handled gracefully (ie: silently - no exception raised).
+		Note that this test is done entirely in the context of a single process
+		since we can't forseeably be kept waiting forever.
+		"""
+
+		test_file_path = os.path.join(self.test_root_path, 'watch_remove_file_removed_test')
+		self._write_for_test(test_file_path)
+
+		# this test is done in-process, we can't forseeably be kept waiting forever
+		test_event_dispatcher = EventDispatcher()
+		test_watch = Watch(mask=IN_ACCESS, path=test_file_path)
+		test_event_dispatcher.add_watch(test_watch)
+		os.unlink(test_file_path)
+
+		try:
+			test_event_dispatcher.rm_watch(test_watch)
+			no_exc = True
+		except:
+			no_exc = False
+			raise
+		finally:
+			self.assertTrue(no_exc)
 
 
 

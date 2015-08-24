@@ -6,8 +6,6 @@ cimport libc.string
 import os
 import stat
 
-#TODO - control access to '_' private members properly with getters and setters?
-
 IN_ACCESS 	=	0x00000001      #File was accessed 
 IN_MODIFY	=	0x00000002      # File was modified 
 IN_ATTRIB       =       0x00000004      # Metadata changed 
@@ -205,34 +203,45 @@ class EventDispatcher(object):
 		"""
 		Add the Watch objects for any already-existing subdirectories of
 		parent_watch_obj.path.  If gen_events is true, yield an Event
-		object for any such subdir.  This is for cases where we call this
-		method to catch up any missed IN_CREATE | IN_ISDIR events.
+		object for any such subdir; also yield an Event for any already-existing file
+		if the parent_watch_obj mask doesn't specify IN_ISDIR
+		This is for cases where we call this method to catch up any missed IN_CREATE events. 
 		"""
 
 		for (root, dirnames, filenames) in os.walk(parent_watch_obj.path):
-			for dirname in dirnames:
-				dir_path = os.path.join(root, dirname)
-				new_watch_obj = Watch(
-					mask=parent_watch_obj.child_mask if parent_watch_obj._is_tree_root else parent_watch_obj.mask,
-					_effective_mask=parent_watch_obj._effective_child_mask if parent_watch_obj._is_tree_root else parent_watch_obj._effective_mask,
-					path=dir_path,
-					_is_tree=True,
-					_tree_root_watch=parent_watch_obj if parent_watch_obj._is_tree_root else parent_watch_obj._tree_root_watch,
-				)
-				self.add_watch(new_watch_obj)
+			new_watch_obj = Watch(
+				mask=parent_watch_obj.child_mask if parent_watch_obj._is_tree_root else parent_watch_obj.mask,
+				_effective_mask=parent_watch_obj._effective_child_mask if parent_watch_obj._is_tree_root else parent_watch_obj._effective_mask,
+				path=root,
+				_is_tree=True,
+				_tree_root_watch=parent_watch_obj if parent_watch_obj._is_tree_root else parent_watch_obj._tree_root_watch,
+			)
+			self.add_watch(new_watch_obj)
 
-				if gen_events:
-					yield (new_watch_obj,
-						Event(
-							_wd=new_watch_obj._wd,
-							watch_obj=new_watch_obj,
-							full_event_path=dir_path,
-							mask=gen_event_mask,
-							cookie=None
-						)
+			if gen_events:
+				yield (new_watch_obj,
+					Event(
+						_wd=new_watch_obj._wd,
+						watch_obj=new_watch_obj,
+						full_event_path=root,
+						mask=gen_event_mask | IN_ISDIR,
+						cookie=None
 					)
-				else:
-					yield (new_watch_obj, None)
+				)
+			else:
+				yield (new_watch_obj, None)
+				
+			if gen_events and not ((parent_watch_obj.mask & IN_ISDIR) > 0):
+				for filename in filenames:
+					file_path = os.path.join(root, filename)
+					yield (None, Event(
+						_wd=new_watch_obj._wd,
+						watch_obj=new_watch_obj,
+						full_event_path=file_path,
+						mask=gen_event_mask,
+						cookie=None
+					))
+				 
 
 			
 
@@ -258,8 +267,6 @@ class EventDispatcher(object):
 		#NOTE - does adding a file watch to a dir have the same essential
 		# behaviour as adding the watch to all files in the dir?
 		# YES - for all masks except IN_DELETE_SELF, which should not be a problem
-
-		#NOTE - does this result in potentially two events on deletion?
 
 		root_watch_obj._is_tree = True
 		root_watch_obj._is_tree_root = True
@@ -301,10 +308,6 @@ class EventDispatcher(object):
 		if (watch_obj._is_tree_root) and watch_obj._child_watch_set and (len(watch_obj._child_watch_set) > 0): 
 			raise ValueError("Cannot remove tree roots with live children individually")
 
-		#NOTE - is there a better way to deal with already-removed files than to
-		# stat them here and avoid calling inotify if they're removed?
-		# Should we catch the exception and then stat?  Otherwise, potential
-		# race between stat and inotify
 		ret = inotify_rm_watch(self._inotify_fd, watch_obj._wd)
 		if ret == -1:
 			# invalid argument - most likely file deleted, keep on trucking
@@ -359,7 +362,7 @@ class EventDispatcher(object):
 			# it won't block waiting to fill the buffer completely
 
 			#TODO - support non-blocking read so that we yield straight away when there are no
-			# events
+			# events?
 			read_len = posix.unistd.read(self._inotify_fd, read_buf, 4096)
 
 			if read_len == -1:
@@ -370,20 +373,7 @@ class EventDispatcher(object):
 
 			# check on each iteration that we haven't been closed, since we (potentially) yield on each iteration
 			while (processed_len < read_len) and not self._closed: 
-
-				#TODO -  How can self._wd_list be None here if it is
-				# set None in self.close() and we check self._closed?
-
-				# This is highly intermittent
-
-				#DEBUG
-				try:
-					matched_watch_obj = self._wd_list[event_ptr.wd]
-
-				except TypeError:
-					print "self._closed: %s" % self._closed
-					print "type(self._wd_list) %s" % (type(self._wd_list))
-					raise
+				matched_watch_obj = self._wd_list[event_ptr.wd]
 
 				# * if event_name is None, we know the event occurred on the watched
 				# directory itself, rather than a file within it
@@ -437,14 +427,18 @@ class EventDispatcher(object):
 					#NOTE - some user actions (eg: mkdir -p) are known to win the race against IN_CREATE sometimes,
 					# so walk through the new dir and add watches to any subdirs that already exist
 					# at this point, yielding events for them too
-					for (catchup_dir_w, catchup_dir_e) in self._gen_subdir_child_watches(new_watch_obj, gen_events=True, gen_event_mask=e.mask):
 
+					# remove IN_ISDIR from gen_event_mask, it will automatically be ORed on for dirs
+					for (catchup_w, catchup_e) in self._gen_subdir_child_watches(new_watch_obj, gen_events=True, gen_event_mask=(e.mask & (~IN_ISDIR))):
 						# we could be closed inside this loop since we yield in it
 						if self._closed:
 							break
 
-						self.add_watch(catchup_dir_w)
-						yield catchup_dir_e
+						if catchup_w is not None:
+							self.add_watch(catchup_w)
+
+						if catchup_e is not None:
+							yield catchup_e
 						
 				
 				if (e.mask & IN_UNMOUNT) > 0 and self.ioerror_on_unmount:
