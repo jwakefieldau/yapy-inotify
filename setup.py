@@ -3,8 +3,10 @@ from distutils.extension import Extension
 from Cython.Build import cythonize
 
 setup(
-	# how does name= affect things?
-	name='inotify',
-	install_requires='Cython>=0.20.2'
+	name='yapy-inotify',
+	version='0.01',
+	requires=[
+		'Cython',
+	],
 	ext_modules=cythonize([Extension('inotify', ['inotify.pyx'])]),
 )
