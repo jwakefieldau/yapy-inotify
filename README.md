@@ -1,6 +1,6 @@
-# python-inotify
+# yapy-inotify
 
-python-inotify is yet another python wrapper for inotify, written with much the same
+yapy-inotify is yet another python wrapper for inotify, written with much the same
 motivation as the others - I didn't like them.
 
 Cython is required to build this, as it handles the Python <-> libc interface.
@@ -24,6 +24,10 @@ requiring thread-safety is imagined.
 ## example
 
 See the examples/ directory
+
+## install
+
+python ./setup.py install
 
 ## tests
 
